@@ -103,18 +103,21 @@ func rewriteCookiePath(cookie, domain, proxyBase string) string {
 func RewriteRequestHeaders(req *http.Request, domain, randomIP, userAgent string) {
 	req.Host = domain
 
-	// Set IP spoofing headers
+	// Set IP spoofing headers (avoid CF-specific headers)
 	req.Header.Set("X-Forwarded-For", randomIP)
 	req.Header.Set("X-Real-IP", randomIP)
 	req.Header.Set("X-Originating-IP", randomIP)
 	req.Header.Set("True-Client-IP", randomIP)
 	req.Header.Set("Client-IP", randomIP)
-	req.Header.Set("CF-Connecting-IP", randomIP)
 
 	// Set user agent
 	req.Header.Set("User-Agent", userAgent)
 
-	// Remove headers that might reveal proxy
+	// Disable compression to avoid dealing with gzip/brotli decompression
+	req.Header.Set("Accept-Encoding", "identity")
+
+	// Remove headers that might reveal proxy or cause Cloudflare issues
 	req.Header.Del("X-Forwarded-Host")
 	req.Header.Del("X-Forwarded-Proto")
+	req.Header.Del("CF-Connecting-IP") // Cloudflare treats spoofed CF headers as abuse
 }
