@@ -38,7 +38,6 @@ type proxyState struct {
 	key              string
 	url              *url.URL
 	unavailableUntil time.Time
-	lastSuccess      time.Time
 }
 
 type proxyCandidate struct {
@@ -52,12 +51,11 @@ type ProxyPool struct {
 	sourceURL       string
 	failureCooldown time.Duration
 
-	refreshMu      sync.Mutex
-	mu             sync.RWMutex
-	proxies        []*proxyState
-	lastRefresh    time.Time
-	lastSuccessKey string
-	next           int
+	refreshMu   sync.Mutex
+	mu          sync.RWMutex
+	proxies     []*proxyState
+	lastRefresh time.Time
+	next        int
 }
 
 func NewProxyPool(logger *log.Logger) *ProxyPool {
@@ -110,38 +108,20 @@ func (p *ProxyPool) Refresh(ctx context.Context) error {
 	for _, state := range states {
 		if old, ok := previous[state.key]; ok {
 			state.unavailableUntil = old.unavailableUntil
-			state.lastSuccess = old.lastSuccess
 		}
 	}
 
 	sort.Slice(states, func(i, j int) bool {
-		if states[i].lastSuccess.Equal(states[j].lastSuccess) {
-			return states[i].key < states[j].key
-		}
-		return states[i].lastSuccess.After(states[j].lastSuccess)
+		return states[i].key < states[j].key
 	})
 
 	p.proxies = states
 	p.lastRefresh = time.Now()
 	if len(states) == 0 {
-		p.lastSuccessKey = ""
 		p.next = 0
 		return nil
 	}
 
-	foundSuccessKey := false
-	for idx, state := range states {
-		if state.key == p.lastSuccessKey {
-			foundSuccessKey = true
-			if idx < p.next {
-				p.next = idx
-			}
-			break
-		}
-	}
-	if !foundSuccessKey {
-		p.lastSuccessKey = ""
-	}
 	if p.next >= len(states) {
 		p.next = 0
 	}
@@ -198,30 +178,9 @@ func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
 
 	preferred := make([]proxyCandidate, 0, len(p.proxies))
 	fallback := make([]proxyCandidate, 0, len(p.proxies))
-	used := make(map[string]struct{}, len(p.proxies))
-
-	if p.lastSuccessKey != "" {
-		for _, state := range p.proxies {
-			if state.key != p.lastSuccessKey {
-				continue
-			}
-
-			candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
-			if now.Before(state.unavailableUntil) {
-				fallback = append(fallback, candidate)
-			} else {
-				preferred = append(preferred, candidate)
-			}
-			used[state.key] = struct{}{}
-			break
-		}
-	}
 
 	for i := 0; i < len(p.proxies); i++ {
 		state := p.proxies[(start+i)%len(p.proxies)]
-		if _, ok := used[state.key]; ok {
-			continue
-		}
 
 		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
 		if now.Before(state.unavailableUntil) {
@@ -242,15 +201,12 @@ func (p *ProxyPool) MarkSuccess(key string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	now := time.Now()
 	for _, state := range p.proxies {
 		if state.key != key {
 			continue
 		}
 
 		state.unavailableUntil = time.Time{}
-		state.lastSuccess = now
-		p.lastSuccessKey = key
 		return
 	}
 }
@@ -441,11 +397,7 @@ func parseProxyStates(body []byte) ([]*proxyState, error) {
 
 func isAllowedProxyEntry(entry upstreamProxyEntry) bool {
 	protocol := strings.ToLower(strings.TrimSpace(entry.Protocol))
-	if protocol == "socks5" {
-		return true
-	}
-
-	return protocol == "http" && entry.HTTPS
+	return protocol == "socks" || protocol == "socks5"
 }
 
 func cloneURL(u *url.URL) *url.URL {
