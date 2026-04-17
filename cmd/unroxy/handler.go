@@ -18,14 +18,21 @@ type ProxyHandler struct {
 	htmlRewriter *rewriter.HTMLRewriter
 	cssRewriter  *rewriter.CSSRewriter
 	jsRewriter   *rewriter.JSRewriter
+	transport    http.RoundTripper
 }
 
 // NewProxyHandler creates a new proxy handler
 func NewProxyHandler() *ProxyHandler {
+	return NewProxyHandlerWithTransport(nil)
+}
+
+// NewProxyHandlerWithTransport creates a new proxy handler with a custom transport.
+func NewProxyHandlerWithTransport(transport http.RoundTripper) *ProxyHandler {
 	return &ProxyHandler{
 		htmlRewriter: &rewriter.HTMLRewriter{},
 		cssRewriter:  &rewriter.CSSRewriter{},
 		jsRewriter:   &rewriter.JSRewriter{},
+		transport:    transport,
 	}
 }
 
@@ -68,6 +75,7 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 	userAgent := utils.RandomUserAgent()
 
 	return &httputil.ReverseProxy{
+		Transport: h.transport,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "https"
 			req.URL.Host = domain
