@@ -23,7 +23,7 @@ func TestParseProxyStates(t *testing.T) {
 		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}
 	]`)
 
-	states, err := parseProxyStates(body)
+	states, err := parseProxyStates(body, parseProxyProtocols("sock"))
 	if err != nil {
 		t.Fatalf("parseProxyStates returned error: %v", err)
 	}
@@ -37,6 +37,48 @@ func TestParseProxyStates(t *testing.T) {
 	}
 	if states[0].key != "socks://5.5.5.5:1080" && states[1].key != "socks://5.5.5.5:1080" {
 		t.Fatalf("expected filtered list to keep socks proxy")
+	}
+}
+
+func TestParseProxyStatesHTTPIncludesHTTPS(t *testing.T) {
+	body := []byte(`[
+		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
+		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true},
+		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}
+	]`)
+
+	states, err := parseProxyStates(body, parseProxyProtocols("http"))
+	if err != nil {
+		t.Fatalf("parseProxyStates returned error: %v", err)
+	}
+
+	if len(states) != 2 {
+		t.Fatalf("expected 2 states, got %d", len(states))
+	}
+
+	if states[0].key != "http://2.2.2.2:8080" && states[1].key != "http://2.2.2.2:8080" {
+		t.Fatalf("expected filtered list to keep http proxy")
+	}
+	if states[0].key != "https://4.4.4.4:8443" && states[1].key != "https://4.4.4.4:8443" {
+		t.Fatalf("expected filtered list to keep https proxy")
+	}
+}
+
+func TestParseProxyStatesAllIncludesSupportedProtocols(t *testing.T) {
+	body := []byte(`[
+		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false},
+		{"proxy":"socks://5.5.5.5:1080","protocol":"socks","https":false},
+		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
+		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true}
+	]`)
+
+	states, err := parseProxyStates(body, parseProxyProtocols("all"))
+	if err != nil {
+		t.Fatalf("parseProxyStates returned error: %v", err)
+	}
+
+	if len(states) != 4 {
+		t.Fatalf("expected 4 states, got %d", len(states))
 	}
 }
 
@@ -156,7 +198,7 @@ func TestProxyPoolEnsureFreshUsesTTLCache(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pool := NewProxyPool(log.New(io.Discard, "", 0))
+	pool := NewProxyPool(log.New(io.Discard, "", 0), parseProxyProtocols("all"))
 	pool.sourceURL = server.URL
 
 	if err := pool.EnsureFresh(context.Background(), time.Now()); err != nil {
@@ -199,7 +241,7 @@ func TestProxyPoolEnsureFreshKeepsStaleCacheOnRefreshFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pool := NewProxyPool(log.New(io.Discard, "", 0))
+	pool := NewProxyPool(log.New(io.Discard, "", 0), parseProxyProtocols("all"))
 	pool.sourceURL = server.URL
 
 	if err := pool.EnsureFresh(context.Background(), time.Now()); err != nil {
