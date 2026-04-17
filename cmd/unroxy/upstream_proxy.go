@@ -46,10 +46,11 @@ type proxyCandidate struct {
 }
 
 type ProxyPool struct {
-	client          *http.Client
-	logger          *log.Logger
-	sourceURL       string
-	failureCooldown time.Duration
+	client           *http.Client
+	logger           *log.Logger
+	sourceURL        string
+	failureCooldown  time.Duration
+	allowedProtocols map[string]struct{}
 
 	refreshMu   sync.Mutex
 	mu          sync.RWMutex
@@ -58,16 +59,17 @@ type ProxyPool struct {
 	next        int
 }
 
-func NewProxyPool(logger *log.Logger) *ProxyPool {
+func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *ProxyPool {
 	if logger == nil {
 		logger = log.Default()
 	}
 
 	return &ProxyPool{
-		client:          &http.Client{Timeout: proxyFetchTimeout},
-		logger:          logger,
-		sourceURL:       upstreamProxyListURL,
-		failureCooldown: proxyFailureCooldown,
+		client:           &http.Client{Timeout: proxyFetchTimeout},
+		logger:           logger,
+		sourceURL:        upstreamProxyListURL,
+		failureCooldown:  proxyFailureCooldown,
+		allowedProtocols: cloneAllowedProtocols(allowedProtocols),
 	}
 }
 
@@ -92,7 +94,7 @@ func (p *ProxyPool) Refresh(ctx context.Context) error {
 		return err
 	}
 
-	states, err := parseProxyStates(body)
+	states, err := parseProxyStates(body, p.allowedProtocols)
 	if err != nil {
 		return err
 	}
@@ -365,7 +367,7 @@ func shouldRetryError(err error) bool {
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
-func parseProxyStates(body []byte) ([]*proxyState, error) {
+func parseProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*proxyState, error) {
 	var entries []upstreamProxyEntry
 	if err := json.Unmarshal(body, &entries); err != nil {
 		return nil, err
@@ -374,7 +376,7 @@ func parseProxyStates(body []byte) ([]*proxyState, error) {
 	states := make([]*proxyState, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
-		if !isAllowedProxyEntry(entry) {
+		if !isAllowedProxyEntry(entry, allowedProtocols) {
 			continue
 		}
 
@@ -395,9 +397,27 @@ func parseProxyStates(body []byte) ([]*proxyState, error) {
 	return states, nil
 }
 
-func isAllowedProxyEntry(entry upstreamProxyEntry) bool {
+func isAllowedProxyEntry(entry upstreamProxyEntry, allowedProtocols map[string]struct{}) bool {
+	if len(allowedProtocols) == 0 {
+		return false
+	}
+
 	protocol := strings.ToLower(strings.TrimSpace(entry.Protocol))
-	return protocol == "socks" || protocol == "socks5"
+	_, ok := allowedProtocols[protocol]
+	return ok
+}
+
+func cloneAllowedProtocols(allowedProtocols map[string]struct{}) map[string]struct{} {
+	if len(allowedProtocols) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]struct{}, len(allowedProtocols))
+	for protocol := range allowedProtocols {
+		cloned[protocol] = struct{}{}
+	}
+
+	return cloned
 }
 
 func cloneURL(u *url.URL) *url.URL {
