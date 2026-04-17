@@ -1,5 +1,7 @@
 # Binaries
 /proxy
+/unroxy
+/dist/
 *.exe
 *.exe~
 *.dll
