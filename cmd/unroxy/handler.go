@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"universal-proxy/cmd/proxy/rewriter"
-	"universal-proxy/cmd/proxy/utils"
+	"unroxy/cmd/unroxy/rewriter"
+	"unroxy/cmd/unroxy/utils"
 )
 
 // ProxyHandler handles all proxy requests

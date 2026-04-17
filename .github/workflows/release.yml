@@ -24,9 +24,9 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/universal-proxy-linux-amd64 ./cmd/proxy
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o dist/universal-proxy-darwin-amd64 ./cmd/proxy
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o dist/universal-proxy-windows-amd64.exe ./cmd/proxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/unroxy-linux-amd64 ./cmd/unroxy
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o dist/unroxy-darwin-amd64 ./cmd/unroxy
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o dist/unroxy-windows-amd64.exe ./cmd/unroxy
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

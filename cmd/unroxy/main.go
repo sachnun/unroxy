@@ -20,7 +20,7 @@ func main() {
 
 	handler := NewProxyHandler()
 
-	log.Printf("Universal Proxy running on :%s", port)
+	log.Printf("Unroxy running on :%s", port)
 	log.Printf("Usage: http://localhost:%s/{domain}/{path}", port)
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
