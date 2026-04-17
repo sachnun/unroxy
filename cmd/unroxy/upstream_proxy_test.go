@@ -106,7 +106,9 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 }
 
 func TestRotatingProxyTransportRetriesUntilSuccess(t *testing.T) {
+	var logs strings.Builder
 	pool := &ProxyPool{
+		logger:          log.New(&logs, "", 0),
 		failureCooldown: time.Minute,
 		lastRefresh:     time.Now(),
 		proxies: []*proxyState{
@@ -167,6 +169,20 @@ func TestRotatingProxyTransportRetriesUntilSuccess(t *testing.T) {
 	}
 	if !pool.proxies[2].unavailableUntil.IsZero() {
 		t.Fatalf("expected successful proxy cooldown to be cleared")
+	}
+
+	output := logs.String()
+	if !strings.Contains(output, "proxy attempt target=https://example.com/path via=http://bad:80") {
+		t.Fatalf("expected attempt log for bad proxy, got %q", output)
+	}
+	if !strings.Contains(output, "proxy failed target=https://example.com/path via=http://bad:80 err=dial failed") {
+		t.Fatalf("expected failure log for bad proxy, got %q", output)
+	}
+	if !strings.Contains(output, "proxy retry status target=https://example.com/path via=http://blocked:80 status=403") {
+		t.Fatalf("expected retry status log for blocked proxy, got %q", output)
+	}
+	if !strings.Contains(output, "proxy success target=https://example.com/path via=http://good:80 status=200") {
+		t.Fatalf("expected success log for good proxy, got %q", output)
 	}
 }
 

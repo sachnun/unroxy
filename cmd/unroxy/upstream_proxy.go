@@ -234,18 +234,33 @@ func (p *ProxyPool) Count() int {
 }
 
 type RotatingProxyTransport struct {
+	logger    *log.Logger
 	pool      *ProxyPool
 	transport http.RoundTripper
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
+	logger := log.Default()
+	if pool != nil && pool.logger != nil {
+		logger = pool.logger
+	}
+
 	return &RotatingProxyTransport{
+		logger:    logger,
 		pool:      pool,
 		transport: newProxyAwareTransport(),
 	}
 }
 
 func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	logger := t.logger
+	if logger == nil {
+		logger = log.Default()
+		if t.pool != nil && t.pool.logger != nil {
+			logger = t.pool.logger
+		}
+	}
+
 	now := time.Now()
 	if err := t.pool.EnsureFresh(req.Context(), now); err != nil {
 		return nil, err
@@ -263,14 +278,17 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 	var lastErr error
 	for _, candidate := range candidates {
+		logger.Printf("proxy attempt target=%s via=%s", req.URL.String(), candidate.key)
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
 			if !shouldRetryError(err) {
+				logger.Printf("proxy failed target=%s via=%s err=%v", req.URL.String(), candidate.key, err)
 				return nil, err
 			}
 
 			t.pool.MarkFailure(candidate.key)
+			logger.Printf("proxy failed target=%s via=%s err=%v", req.URL.String(), candidate.key, err)
 			lastErr = err
 			continue
 		}
@@ -279,11 +297,13 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			t.pool.MarkFailure(candidate.key)
+			logger.Printf("proxy retry status target=%s via=%s status=%d", req.URL.String(), candidate.key, resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key)
+		logger.Printf("proxy success target=%s via=%s status=%d", req.URL.String(), candidate.key, resp.StatusCode)
 		return resp, nil
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"strconv"
@@ -18,20 +19,31 @@ type ProxyHandler struct {
 	htmlRewriter *rewriter.HTMLRewriter
 	cssRewriter  *rewriter.CSSRewriter
 	jsRewriter   *rewriter.JSRewriter
+	logger       *log.Logger
 	transport    http.RoundTripper
 }
 
 // NewProxyHandler creates a new proxy handler
 func NewProxyHandler() *ProxyHandler {
-	return NewProxyHandlerWithTransport(nil)
+	return NewProxyHandlerWithLoggerAndTransport(log.Default(), nil)
 }
 
 // NewProxyHandlerWithTransport creates a new proxy handler with a custom transport.
 func NewProxyHandlerWithTransport(transport http.RoundTripper) *ProxyHandler {
+	return NewProxyHandlerWithLoggerAndTransport(log.Default(), transport)
+}
+
+// NewProxyHandlerWithLoggerAndTransport creates a new proxy handler with a logger and custom transport.
+func NewProxyHandlerWithLoggerAndTransport(logger *log.Logger, transport http.RoundTripper) *ProxyHandler {
+	if logger == nil {
+		logger = log.Default()
+	}
+
 	return &ProxyHandler{
 		htmlRewriter: &rewriter.HTMLRewriter{},
 		cssRewriter:  &rewriter.CSSRewriter{},
 		jsRewriter:   &rewriter.JSRewriter{},
+		logger:       logger,
 		transport:    transport,
 	}
 }
@@ -40,9 +52,12 @@ func NewProxyHandlerWithTransport(transport http.RoundTripper) *ProxyHandler {
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	domain, path, query := h.parseRequest(r)
 	if domain == "" {
+		h.logger.Printf("request method=%s source=%s invalid_path=true remote=%s", r.Method, requestSource(r), r.RemoteAddr)
 		http.Error(w, "Invalid path. Usage: /domain.com/path", http.StatusBadRequest)
 		return
 	}
+
+	h.logger.Printf("request method=%s source=%s target=%s remote=%s", r.Method, requestSource(r), targetURL(domain, path, query), r.RemoteAddr)
 
 	proxy := h.createProxy(domain, path, query)
 	proxy.ServeHTTP(w, r)
@@ -153,4 +168,25 @@ func (h *ProxyHandler) readResponseBody(resp *http.Response) ([]byte, error) {
 	resp.Body.Close()
 
 	return body, nil
+}
+
+func requestSource(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+
+	if r.URL.RawQuery == "" {
+		return r.URL.Path
+	}
+
+	return r.URL.Path + "?" + r.URL.RawQuery
+}
+
+func targetURL(domain, path, query string) string {
+	target := "https://" + domain + path
+	if query == "" {
+		return target
+	}
+
+	return target + "?" + query
 }

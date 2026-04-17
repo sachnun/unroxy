@@ -21,13 +21,14 @@ func main() {
 		port = "8080"
 	}
 
-	handler := NewProxyHandlerWithTransport(newUpstreamTransport(log.Default()))
+	logger := log.Default()
+	handler := NewProxyHandlerWithLoggerAndTransport(logger, newUpstreamTransport(logger))
 
-	log.Printf("Unroxy running on :%s", port)
-	log.Printf("Usage: http://localhost:%s/{domain}/{path}", port)
+	logger.Printf("Unroxy running on :%s", port)
+	logger.Printf("Usage: http://localhost:%s/{domain}/{path}", port)
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		logger.Fatalf("Server failed: %v", err)
 	}
 }
 

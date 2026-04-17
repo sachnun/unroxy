@@ -1,8 +1,11 @@
 package main
 
 import (
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -131,5 +134,40 @@ func TestNewProxyHandler(t *testing.T) {
 	}
 	if h.transport != nil {
 		t.Error("Expected nil transport by default")
+	}
+	if h.logger == nil {
+		t.Error("Expected non-nil logger")
+	}
+}
+
+func TestProxyHandlerLogsRequest(t *testing.T) {
+	var logs strings.Builder
+	logger := log.New(&logs, "", 0)
+	h := NewProxyHandlerWithLoggerAndTransport(logger, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/example.com/search?q=hello", nil)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	output := logs.String()
+	if !strings.Contains(output, "request method=GET") {
+		t.Fatalf("expected request log, got %q", output)
+	}
+	if !strings.Contains(output, "source=/example.com/search?q=hello") {
+		t.Fatalf("expected source path in log, got %q", output)
+	}
+	if !strings.Contains(output, "target=https://example.com/search?q=hello") {
+		t.Fatalf("expected target URL in log, got %q", output)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 }
