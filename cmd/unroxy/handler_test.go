@@ -129,4 +129,7 @@ func TestNewProxyHandler(t *testing.T) {
 	if h.jsRewriter == nil {
 		t.Error("Expected non-nil JS rewriter")
 	}
+	if h.transport != nil {
+		t.Error("Expected nil transport by default")
+	}
 }

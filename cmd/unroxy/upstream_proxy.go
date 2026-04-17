@@ -1,0 +1,458 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	upstreamProxyListURL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json"
+	upstreamProxyListTTL = 10 * time.Minute
+	proxyFailureCooldown = time.Minute
+	proxyFetchTimeout    = 30 * time.Second
+	proxyDialTimeout     = 5 * time.Second
+	proxyHeaderTimeout   = 20 * time.Second
+)
+
+var errNoUpstreamProxy = errors.New("no upstream proxies available")
+
+type upstreamProxyEntry struct {
+	Proxy    string `json:"proxy"`
+	Protocol string `json:"protocol"`
+	HTTPS    bool   `json:"https"`
+}
+
+type proxyState struct {
+	key              string
+	url              *url.URL
+	unavailableUntil time.Time
+	lastSuccess      time.Time
+}
+
+type proxyCandidate struct {
+	key string
+	url *url.URL
+}
+
+type ProxyPool struct {
+	client          *http.Client
+	logger          *log.Logger
+	sourceURL       string
+	failureCooldown time.Duration
+
+	refreshMu      sync.Mutex
+	mu             sync.RWMutex
+	proxies        []*proxyState
+	lastRefresh    time.Time
+	lastSuccessKey string
+	next           int
+}
+
+func NewProxyPool(logger *log.Logger) *ProxyPool {
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	return &ProxyPool{
+		client:          &http.Client{Timeout: proxyFetchTimeout},
+		logger:          logger,
+		sourceURL:       upstreamProxyListURL,
+		failureCooldown: proxyFailureCooldown,
+	}
+}
+
+func (p *ProxyPool) Refresh(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.sourceURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected proxy list status: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	states, err := parseProxyStates(body)
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	previous := make(map[string]*proxyState, len(p.proxies))
+	for _, state := range p.proxies {
+		previous[state.key] = state
+	}
+
+	for _, state := range states {
+		if old, ok := previous[state.key]; ok {
+			state.unavailableUntil = old.unavailableUntil
+			state.lastSuccess = old.lastSuccess
+		}
+	}
+
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].lastSuccess.Equal(states[j].lastSuccess) {
+			return states[i].key < states[j].key
+		}
+		return states[i].lastSuccess.After(states[j].lastSuccess)
+	})
+
+	p.proxies = states
+	p.lastRefresh = time.Now()
+	if len(states) == 0 {
+		p.lastSuccessKey = ""
+		p.next = 0
+		return nil
+	}
+
+	foundSuccessKey := false
+	for idx, state := range states {
+		if state.key == p.lastSuccessKey {
+			foundSuccessKey = true
+			if idx < p.next {
+				p.next = idx
+			}
+			break
+		}
+	}
+	if !foundSuccessKey {
+		p.lastSuccessKey = ""
+	}
+	if p.next >= len(states) {
+		p.next = 0
+	}
+
+	return nil
+}
+
+func (p *ProxyPool) EnsureFresh(ctx context.Context, now time.Time) error {
+	if !p.needsRefresh(now) {
+		return nil
+	}
+
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
+
+	if !p.needsRefresh(now) {
+		return nil
+	}
+
+	if err := p.Refresh(ctx); err != nil {
+		p.mu.RLock()
+		hasCachedProxies := len(p.proxies) > 0
+		lastRefresh := p.lastRefresh
+		p.mu.RUnlock()
+
+		if hasCachedProxies {
+			p.logger.Printf("proxy list refresh failed, using cached list from %s: %v", lastRefresh.Format(time.RFC3339), err)
+			return nil
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (p *ProxyPool) needsRefresh(now time.Time) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.lastRefresh.IsZero() || now.Sub(p.lastRefresh) >= upstreamProxyListTTL
+}
+
+func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.proxies) == 0 {
+		return nil
+	}
+
+	start := p.next
+	p.next = (p.next + 1) % len(p.proxies)
+
+	preferred := make([]proxyCandidate, 0, len(p.proxies))
+	fallback := make([]proxyCandidate, 0, len(p.proxies))
+	used := make(map[string]struct{}, len(p.proxies))
+
+	if p.lastSuccessKey != "" {
+		for _, state := range p.proxies {
+			if state.key != p.lastSuccessKey {
+				continue
+			}
+
+			candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
+			if now.Before(state.unavailableUntil) {
+				fallback = append(fallback, candidate)
+			} else {
+				preferred = append(preferred, candidate)
+			}
+			used[state.key] = struct{}{}
+			break
+		}
+	}
+
+	for i := 0; i < len(p.proxies); i++ {
+		state := p.proxies[(start+i)%len(p.proxies)]
+		if _, ok := used[state.key]; ok {
+			continue
+		}
+
+		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
+		if now.Before(state.unavailableUntil) {
+			fallback = append(fallback, candidate)
+		} else {
+			preferred = append(preferred, candidate)
+		}
+	}
+
+	if len(preferred) == 0 {
+		return fallback
+	}
+
+	return append(preferred, fallback...)
+}
+
+func (p *ProxyPool) MarkSuccess(key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	for _, state := range p.proxies {
+		if state.key != key {
+			continue
+		}
+
+		state.unavailableUntil = time.Time{}
+		state.lastSuccess = now
+		p.lastSuccessKey = key
+		return
+	}
+}
+
+func (p *ProxyPool) MarkFailure(key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, state := range p.proxies {
+		if state.key != key {
+			continue
+		}
+
+		state.unavailableUntil = time.Now().Add(p.failureCooldown)
+		return
+	}
+}
+
+func (p *ProxyPool) Count() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.proxies)
+}
+
+type RotatingProxyTransport struct {
+	pool      *ProxyPool
+	transport http.RoundTripper
+}
+
+func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
+	return &RotatingProxyTransport{
+		pool:      pool,
+		transport: newProxyAwareTransport(),
+	}
+}
+
+func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	now := time.Now()
+	if err := t.pool.EnsureFresh(req.Context(), now); err != nil {
+		return nil, err
+	}
+
+	candidates := t.pool.Candidates(now)
+	if len(candidates) == 0 {
+		return nil, errNoUpstreamProxy
+	}
+
+	body, hasBody, err := snapshotRequestBody(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for _, candidate := range candidates {
+		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
+		resp, err := t.transport.RoundTrip(attemptReq)
+		if err != nil {
+			if !shouldRetryError(err) {
+				return nil, err
+			}
+
+			t.pool.MarkFailure(candidate.key)
+			lastErr = err
+			continue
+		}
+
+		if shouldRetryStatus(resp.StatusCode) {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			t.pool.MarkFailure(candidate.key)
+			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
+			continue
+		}
+
+		t.pool.MarkSuccess(candidate.key)
+		return resp, nil
+	}
+
+	if lastErr == nil {
+		lastErr = errNoUpstreamProxy
+	}
+
+	return nil, lastErr
+}
+
+type proxyContextKey struct{}
+
+func newProxyAwareTransport() http.RoundTripper {
+	dialer := &net.Dialer{
+		Timeout:   proxyDialTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+
+	return &http.Transport{
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			return proxyURL, nil
+		},
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: proxyHeaderTimeout,
+		ExpectContinueTimeout: time.Second,
+	}
+}
+
+func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return nil, false, nil
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, true, err
+	}
+	if err := req.Body.Close(); err != nil {
+		return nil, true, err
+	}
+
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	req.ContentLength = int64(len(body))
+
+	return body, true, nil
+}
+
+func cloneRequestForProxy(req *http.Request, proxyURL *url.URL, body []byte, hasBody bool) *http.Request {
+	ctx := context.WithValue(req.Context(), proxyContextKey{}, proxyURL)
+	attemptReq := req.Clone(ctx)
+
+	if !hasBody {
+		attemptReq.Body = nil
+		attemptReq.GetBody = nil
+		return attemptReq
+	}
+
+	attemptReq.Body = io.NopCloser(bytes.NewReader(body))
+	attemptReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	attemptReq.ContentLength = int64(len(body))
+
+	return attemptReq
+}
+
+func shouldRetryStatus(statusCode int) bool {
+	return statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests
+}
+
+func shouldRetryError(err error) bool {
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func parseProxyStates(body []byte) ([]*proxyState, error) {
+	var entries []upstreamProxyEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, err
+	}
+
+	states := make([]*proxyState, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if !isAllowedProxyEntry(entry) {
+			continue
+		}
+
+		parsed, err := url.Parse(strings.TrimSpace(entry.Proxy))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			continue
+		}
+
+		key := parsed.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		seen[key] = struct{}{}
+		states = append(states, &proxyState{key: key, url: parsed})
+	}
+
+	return states, nil
+}
+
+func isAllowedProxyEntry(entry upstreamProxyEntry) bool {
+	protocol := strings.ToLower(strings.TrimSpace(entry.Protocol))
+	if protocol == "socks5" {
+		return true
+	}
+
+	return protocol == "http" && entry.HTTPS
+}
+
+func cloneURL(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
+	}
+
+	cloned := *u
+	return &cloned
+}
