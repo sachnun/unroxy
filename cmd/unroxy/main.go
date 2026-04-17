@@ -22,7 +22,12 @@ func main() {
 	}
 
 	logger := log.Default()
-	handler := NewProxyHandlerWithLoggerAndTransport(logger, newUpstreamTransport(logger))
+	transport, err := newUpstreamTransport(logger)
+	if err != nil {
+		logger.Fatalf("Upstream proxy initialization failed: %v", err)
+	}
+
+	handler := NewProxyHandlerWithLoggerAndTransport(logger, transport)
 
 	logger.Printf("Unroxy running on :%s", port)
 	logger.Printf("Usage: http://localhost:%s/{domain}/{path}", port)
@@ -32,27 +37,48 @@ func main() {
 	}
 }
 
-func newUpstreamTransport(logger *log.Logger) http.RoundTripper {
+func newUpstreamTransport(logger *log.Logger) (http.RoundTripper, error) {
 	allowedProtocols, invalidValues := parseProxyProtocolConfig(os.Getenv("PROXY"))
+	return buildUpstreamTransport(logger, allowedProtocols, invalidValues, nil)
+}
+
+func buildUpstreamTransport(logger *log.Logger, allowedProtocols map[string]struct{}, invalidValues []string, pool *ProxyPool) (http.RoundTripper, error) {
+	if logger == nil {
+		logger = log.Default()
+	}
+
 	if len(invalidValues) > 0 {
 		logger.Printf("Ignoring unknown PROXY values: %s", strings.Join(invalidValues, ","))
 	}
 
 	if len(allowedProtocols) == 0 {
 		logger.Printf("Upstream proxy mode disabled")
-		return nil
+		return nil, nil
 	}
 
-	pool := NewProxyPool(logger, allowedProtocols)
+	if pool == nil {
+		pool = NewProxyPool(logger, allowedProtocols)
+	}
+
 	if err := pool.Refresh(context.Background()); err != nil {
-		logger.Printf("Initial proxy list refresh failed: %v", err)
-	} else {
-		logger.Printf("Loaded %d upstream proxies", pool.Count())
+		return nil, err
+	}
+
+	logger.Printf("Loaded %d upstream proxies", pool.Count())
+
+	activeCount, inactiveCount, err := pool.PruneInactive(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Printf("Initial proxy health check complete: %d active, %d inactive", activeCount, inactiveCount)
+	if activeCount == 0 {
+		return nil, errNoUpstreamProxy
 	}
 
 	logger.Printf("Upstream proxy mode enabled for protocols: %s", strings.Join(sortedProxyProtocols(allowedProtocols), ","))
 
-	return NewRotatingProxyTransport(pool)
+	return NewRotatingProxyTransport(pool), nil
 }
 
 func proxyEnabled(value string) bool {

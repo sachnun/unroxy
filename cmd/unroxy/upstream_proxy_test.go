@@ -276,6 +276,41 @@ func TestProxyPoolEnsureFreshKeepsStaleCacheOnRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestProxyPoolPruneInactiveRemovesFailedProxies(t *testing.T) {
+	activeProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer activeProxy.Close()
+
+	inactiveProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "blocked", http.StatusBadGateway)
+	}))
+	defer inactiveProxy.Close()
+
+	pool := &ProxyPool{
+		logger:   log.New(io.Discard, "", 0),
+		checkURL: "http://example.com",
+		proxies: []*proxyState{
+			{key: activeProxy.URL, url: mustParseURL(t, activeProxy.URL)},
+			{key: inactiveProxy.URL, url: mustParseURL(t, inactiveProxy.URL)},
+		},
+	}
+
+	active, inactive, err := pool.PruneInactive(context.Background())
+	if err != nil {
+		t.Fatalf("PruneInactive() error = %v, want nil", err)
+	}
+	if active != 1 || inactive != 1 {
+		t.Fatalf("PruneInactive() = (%d, %d), want (1, 1)", active, inactive)
+	}
+	if pool.Count() != 1 {
+		t.Fatalf("pool.Count() = %d, want 1", pool.Count())
+	}
+	if pool.proxies[0].key != activeProxy.URL {
+		t.Fatalf("remaining proxy = %q, want %q", pool.proxies[0].key, activeProxy.URL)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
