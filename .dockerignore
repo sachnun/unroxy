@@ -1,0 +1,11 @@
+.github
+.git
+.gitignore
+.dockerignore
+README.md
+LICENSE
+coverage.html
+*.out
+*.exe
+*.test
+**/*_test.go
