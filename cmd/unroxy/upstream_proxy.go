@@ -22,6 +22,9 @@ const (
 	upstreamProxyListTTL = 10 * time.Minute
 	proxyFailureCooldown = time.Minute
 	proxyFetchTimeout    = 30 * time.Second
+	proxyCheckTimeout    = 4 * time.Second
+	proxyCheckWorkers    = 32
+	proxyCheckURL        = "https://www.gstatic.com/generate_204"
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
 )
@@ -51,6 +54,7 @@ type ProxyPool struct {
 	sourceURL        string
 	failureCooldown  time.Duration
 	allowedProtocols map[string]struct{}
+	checkURL         string
 
 	refreshMu   sync.Mutex
 	mu          sync.RWMutex
@@ -70,7 +74,86 @@ func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *Pro
 		sourceURL:        upstreamProxyListURL,
 		failureCooldown:  proxyFailureCooldown,
 		allowedProtocols: cloneAllowedProtocols(allowedProtocols),
+		checkURL:         proxyCheckURL,
 	}
+}
+
+func (p *ProxyPool) PruneInactive(ctx context.Context) (int, int, error) {
+	p.mu.RLock()
+	states := make([]*proxyState, len(p.proxies))
+	for i, state := range p.proxies {
+		states[i] = &proxyState{key: state.key, url: cloneURL(state.url)}
+	}
+	p.mu.RUnlock()
+
+	if len(states) == 0 {
+		return 0, 0, nil
+	}
+
+	type result struct {
+		state *proxyState
+		ok    bool
+	}
+
+	workerCount := proxyCheckWorkers
+	if len(states) < workerCount {
+		workerCount = len(states)
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+
+	jobs := make(chan *proxyState)
+	results := make(chan result, len(states))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for state := range jobs {
+				ok := p.isProxyActive(ctx, state)
+				results <- result{state: state, ok: ok}
+			}
+		}()
+	}
+
+	go func() {
+		for _, state := range states {
+			jobs <- state
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	activeByKey := make(map[string]struct{}, len(states))
+	for result := range results {
+		if result.ok {
+			activeByKey[result.state.key] = struct{}{}
+		}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	active := make([]*proxyState, 0, len(p.proxies))
+	for _, state := range p.proxies {
+		if _, ok := activeByKey[state.key]; !ok {
+			continue
+		}
+
+		active = append(active, state)
+	}
+
+	p.proxies = active
+	if len(active) == 0 {
+		p.next = 0
+	} else if p.next >= len(active) {
+		p.next = 0
+	}
+
+	return len(active), len(states) - len(active), nil
 }
 
 func (p *ProxyPool) Refresh(ctx context.Context) error {
@@ -231,6 +314,51 @@ func (p *ProxyPool) Count() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.proxies)
+}
+
+func (p *ProxyPool) isProxyActive(ctx context.Context, state *proxyState) bool {
+	if state == nil || state.url == nil {
+		return false
+	}
+
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(state.url),
+		DialContext: (&net.Dialer{
+			Timeout:   proxyDialTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		DisableKeepAlives:     true,
+		MaxIdleConns:          1,
+		MaxIdleConnsPerHost:   1,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: proxyCheckTimeout,
+		ExpectContinueTimeout: time.Second,
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{
+		Timeout:   proxyCheckTimeout,
+		Transport: transport,
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, proxyCheckTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, p.checkURL, nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	return resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK
 }
 
 type RotatingProxyTransport struct {
