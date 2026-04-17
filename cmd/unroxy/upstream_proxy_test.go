@@ -16,6 +16,7 @@ import (
 func TestParseProxyStates(t *testing.T) {
 	body := []byte(`[
 		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false},
+		{"proxy":"socks://5.5.5.5:1080","protocol":"socks","https":false},
 		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
 		{"proxy":"http://3.3.3.3:8080","protocol":"http","https":false},
 		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true},
@@ -31,30 +32,34 @@ func TestParseProxyStates(t *testing.T) {
 		t.Fatalf("expected 2 states, got %d", len(states))
 	}
 
-	if states[0].key != "http://2.2.2.2:8080" && states[1].key != "http://2.2.2.2:8080" {
-		t.Fatalf("expected filtered list to keep https-capable http proxy")
-	}
 	if states[0].key != "socks5://1.1.1.1:1080" && states[1].key != "socks5://1.1.1.1:1080" {
 		t.Fatalf("expected filtered list to keep socks5 proxy")
 	}
+	if states[0].key != "socks://5.5.5.5:1080" && states[1].key != "socks://5.5.5.5:1080" {
+		t.Fatalf("expected filtered list to keep socks proxy")
+	}
 }
 
-func TestProxyPoolCandidatesPreferLastSuccess(t *testing.T) {
+func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
 			{key: "http://1.1.1.1:80", url: mustParseURL(t, "http://1.1.1.1:80")},
 			{key: "http://2.2.2.2:80", url: mustParseURL(t, "http://2.2.2.2:80")},
 			{key: "http://3.3.3.3:80", url: mustParseURL(t, "http://3.3.3.3:80")},
 		},
-		lastSuccessKey: "http://2.2.2.2:80",
 	}
 
-	candidates := pool.Candidates(time.Now())
-	if len(candidates) != 3 {
-		t.Fatalf("expected 3 candidates, got %d", len(candidates))
+	first := pool.Candidates(time.Now())
+	if len(first) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(first))
 	}
-	if candidates[0].key != "http://2.2.2.2:80" {
-		t.Fatalf("expected last successful proxy first, got %s", candidates[0].key)
+	if first[0].key != "http://1.1.1.1:80" || first[1].key != "http://2.2.2.2:80" || first[2].key != "http://3.3.3.3:80" {
+		t.Fatalf("unexpected first candidate order: %q, %q, %q", first[0].key, first[1].key, first[2].key)
+	}
+
+	second := pool.Candidates(time.Now())
+	if second[0].key != "http://2.2.2.2:80" || second[1].key != "http://3.3.3.3:80" || second[2].key != "http://1.1.1.1:80" {
+		t.Fatalf("unexpected second candidate order: %q, %q, %q", second[0].key, second[1].key, second[2].key)
 	}
 }
 
@@ -118,8 +123,8 @@ func TestRotatingProxyTransportRetriesUntilSuccess(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 response, got %d", resp.StatusCode)
 	}
-	if pool.lastSuccessKey != "http://good:80" {
-		t.Fatalf("expected good proxy to be marked as last success, got %q", pool.lastSuccessKey)
+	if !pool.proxies[2].unavailableUntil.IsZero() {
+		t.Fatalf("expected successful proxy cooldown to be cleared")
 	}
 }
 
