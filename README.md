@@ -14,8 +14,6 @@ docker run \
 curl http://localhost:8080/example.com
 ```
 
-If `PROXY` is enabled, Unroxy blocks startup for an initial proxy health check, keeps only active proxies, and exits when no active proxy is available.
-
 ## Development
 
 ```bash
