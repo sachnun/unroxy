@@ -20,4 +20,4 @@ jobs:
         run: go test -v -race -timeout 30s ./...
 
       - name: Build
-        run: go build -o proxy ./cmd/proxy
+        run: go build -o unroxy ./cmd/unroxy
