@@ -5,13 +5,19 @@ Proxy server with URL rewriting.
 ## Usage
 
 ```bash
-# Build and run
-go build -o unroxy ./cmd/unroxy && ./unroxy
+# optional: PROXY=none|http|sock|all
+docker run \
+  -p 8080:8080 \
+  -e PROXY=none \
+  ghcr.io/sachnun/unroxy
 
-# Or use Docker
-docker run -p 8080:8080 ghcr.io/sachnun/unroxy:latest
+curl http://localhost:8080/example.com
 ```
 
-Access any website through `http://localhost:8080/{domain}/{path}`
+## Development
 
-**Example:** `http://localhost:8080/example.com`
+```bash
+go build -o unroxy ./cmd/unroxy && ./unroxy
+```
+
+Access any website through `http://localhost:8080/{domain}/{path}`.
