@@ -2,14 +2,10 @@ package main
 
 import (
 	"bytes"
-	"io"
 	"log"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestProxyEnabled(t *testing.T) {
@@ -98,10 +94,7 @@ func TestNewUpstreamTransportLogsInvalidProxyValues(t *testing.T) {
 	t.Setenv("PROXY", "none,foo,bar")
 
 	var logs bytes.Buffer
-	transport, err := newUpstreamTransport(log.New(&logs, "", 0))
-	if err != nil {
-		t.Fatalf("newUpstreamTransport() error = %v, want nil", err)
-	}
+	transport := newUpstreamTransport(log.New(&logs, "", 0))
 	if transport != nil {
 		t.Fatalf("newUpstreamTransport() = %v, want nil", transport)
 	}
@@ -113,80 +106,5 @@ func TestNewUpstreamTransportLogsInvalidProxyValues(t *testing.T) {
 
 	if !strings.Contains(output, "Upstream proxy mode disabled") {
 		t.Fatalf("expected disabled log in logs, got %q", output)
-	}
-}
-
-func TestBuildUpstreamTransportPrunesInactiveProxies(t *testing.T) {
-	activeProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer activeProxy.Close()
-
-	inactiveProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "blocked", http.StatusBadGateway)
-	}))
-	defer inactiveProxy.Close()
-
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `[`+
-			`{"proxy":"`+activeProxy.URL+`","protocol":"http","https":false},`+
-			`{"proxy":"`+inactiveProxy.URL+`","protocol":"http","https":false}`+
-			`]`)
-	}))
-	defer source.Close()
-
-	pool := NewProxyPool(log.New(io.Discard, "", 0), parseProxyProtocols("http"))
-	pool.sourceURL = source.URL
-	pool.checkURL = "http://example.com"
-
-	transport, err := buildUpstreamTransport(log.New(io.Discard, "", 0), parseProxyProtocols("http"), nil, pool)
-	if err != nil {
-		t.Fatalf("buildUpstreamTransport() error = %v, want nil", err)
-	}
-	if transport == nil {
-		t.Fatalf("buildUpstreamTransport() transport = nil, want rotating transport")
-	}
-	if pool.Count() != 1 {
-		t.Fatalf("pool.Count() = %d, want 1 active proxy", pool.Count())
-	}
-
-	candidates := pool.Candidates(time.Now())
-	if len(candidates) != 1 {
-		t.Fatalf("len(pool.Candidates()) = %d, want 1", len(candidates))
-	}
-	if candidates[0].key != activeProxy.URL {
-		t.Fatalf("active proxy = %q, want %q", candidates[0].key, activeProxy.URL)
-	}
-}
-
-func TestBuildUpstreamTransportFailsWhenNoActiveProxy(t *testing.T) {
-	inactiveProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "blocked", http.StatusBadGateway)
-	}))
-	defer inactiveProxy.Close()
-
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `[{"proxy":"`+inactiveProxy.URL+`","protocol":"http","https":false}]`)
-	}))
-	defer source.Close()
-
-	pool := NewProxyPool(log.New(io.Discard, "", 0), parseProxyProtocols("http"))
-	pool.sourceURL = source.URL
-	pool.checkURL = "http://example.com"
-
-	transport, err := buildUpstreamTransport(log.New(io.Discard, "", 0), parseProxyProtocols("http"), nil, pool)
-	if err == nil {
-		t.Fatalf("buildUpstreamTransport() error = nil, want %v", errNoUpstreamProxy)
-	}
-	if transport != nil {
-		t.Fatalf("buildUpstreamTransport() transport = %v, want nil", transport)
-	}
-	if err != errNoUpstreamProxy {
-		t.Fatalf("buildUpstreamTransport() error = %v, want %v", err, errNoUpstreamProxy)
-	}
-	if pool.Count() != 0 {
-		t.Fatalf("pool.Count() = %d, want 0", pool.Count())
 	}
 }
