@@ -45,6 +45,8 @@ type proxyState struct {
 	unavailableUntil time.Time
 	healthy          bool
 	lastChecked      time.Time
+	verifiedAt       time.Time
+	verifiedHosts    map[string]time.Time
 }
 
 type proxyCandidate struct {
@@ -133,6 +135,8 @@ func (p *ProxyPool) Refresh(ctx context.Context) error {
 			state.unavailableUntil = old.unavailableUntil
 			state.healthy = old.healthy
 			state.lastChecked = old.lastChecked
+			state.verifiedAt = old.verifiedAt
+			state.verifiedHosts = cloneVerifiedHosts(old.verifiedHosts)
 		}
 	}
 
@@ -192,7 +196,8 @@ func (p *ProxyPool) MaintainOnce(ctx context.Context, now time.Time) error {
 
 	checked, healthy, failed := p.checkProxyHealth(ctx, now)
 	if checked > 0 {
-		p.logf("proxy maintenance checked=%d healthy=%d failed=%d pool=%d", checked, healthy, failed, p.Count())
+		probeHealthy, verified := p.healthSummary()
+		p.logf("proxy maintenance batch=%d ok=%d failed=%d probe_healthy=%d verified=%d pool=%d", checked, healthy, failed, probeHealthy, verified, p.Count())
 	}
 
 	return nil
@@ -234,7 +239,7 @@ func (p *ProxyPool) needsRefresh(now time.Time) bool {
 	return p.lastRefresh.IsZero() || now.Sub(p.lastRefresh) >= upstreamProxyListTTL
 }
 
-func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
+func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidate {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -245,7 +250,9 @@ func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
 	start := p.next
 	p.next = (p.next + 1) % len(p.proxies)
 
-	healthy := make([]proxyCandidate, 0, len(p.proxies))
+	hostVerified := make([]proxyCandidate, 0, len(p.proxies))
+	verified := make([]proxyCandidate, 0, len(p.proxies))
+	probed := make([]proxyCandidate, 0, len(p.proxies))
 	untested := make([]proxyCandidate, 0, len(p.proxies))
 	retry := make([]proxyCandidate, 0, len(p.proxies))
 	cooling := make([]proxyCandidate, 0, len(p.proxies))
@@ -260,8 +267,12 @@ func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
 		}
 
 		switch {
+		case hasVerifiedHost(state, targetHost):
+			hostVerified = append(hostVerified, candidate)
+		case !state.verifiedAt.IsZero():
+			verified = append(verified, candidate)
 		case state.healthy:
-			healthy = append(healthy, candidate)
+			probed = append(probed, candidate)
 		case state.lastChecked.IsZero():
 			untested = append(untested, candidate)
 		default:
@@ -270,14 +281,24 @@ func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
 	}
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
-	ordered = append(ordered, healthy...)
+	ordered = append(ordered, hostVerified...)
+	ordered = append(ordered, verified...)
+	ordered = append(ordered, probed...)
 	ordered = append(ordered, untested...)
 	ordered = append(ordered, retry...)
 	ordered = append(ordered, cooling...)
 	return ordered
 }
 
-func (p *ProxyPool) MarkSuccess(key string) {
+func (p *ProxyPool) MarkSuccess(key, targetHost string) {
+	p.markSuccess(key, targetHost, true)
+}
+
+func (p *ProxyPool) MarkProbeSuccess(key string) {
+	p.markSuccess(key, "", false)
+}
+
+func (p *ProxyPool) markSuccess(key, targetHost string, verified bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -286,8 +307,18 @@ func (p *ProxyPool) MarkSuccess(key string) {
 			continue
 		}
 
+		now := time.Now()
 		state.healthy = true
-		state.lastChecked = time.Now()
+		state.lastChecked = now
+		if verified {
+			state.verifiedAt = now
+			if targetHost != "" {
+				if state.verifiedHosts == nil {
+					state.verifiedHosts = make(map[string]time.Time)
+				}
+				state.verifiedHosts[targetHost] = now
+			}
+		}
 		state.unavailableUntil = time.Time{}
 		return
 	}
@@ -302,9 +333,12 @@ func (p *ProxyPool) MarkFailure(key string) {
 			continue
 		}
 
+		now := time.Now()
 		state.healthy = false
-		state.lastChecked = time.Now()
-		state.unavailableUntil = time.Now().Add(p.failureCooldown)
+		state.lastChecked = now
+		state.verifiedAt = time.Time{}
+		state.verifiedHosts = nil
+		state.unavailableUntil = now.Add(p.failureCooldown)
 		return
 	}
 }
@@ -321,6 +355,33 @@ func (p *ProxyPool) logf(format string, args ...any) {
 		logger = log.Default()
 	}
 	logger.Printf(format, args...)
+}
+
+func (p *ProxyPool) healthSummary() (int, int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	probeHealthy := 0
+	verified := 0
+	for _, state := range p.proxies {
+		if state.healthy {
+			probeHealthy++
+		}
+		if !state.verifiedAt.IsZero() {
+			verified++
+		}
+	}
+
+	return probeHealthy, verified
+}
+
+func hasVerifiedHost(state *proxyState, targetHost string) bool {
+	if state == nil || targetHost == "" || len(state.verifiedHosts) == 0 {
+		return false
+	}
+
+	_, ok := state.verifiedHosts[targetHost]
+	return ok
 }
 
 func (p *ProxyPool) HealthCheckCandidates(now time.Time) []proxyCandidate {
@@ -460,7 +521,7 @@ func (p *ProxyPool) checkProxyCandidate(ctx context.Context, transport http.Roun
 
 	io.Copy(io.Discard, resp.Body)
 	if isHealthyProxyStatus(resp.StatusCode) {
-		p.MarkSuccess(candidate.key)
+		p.MarkProbeSuccess(candidate.key)
 		return true, true
 	}
 
@@ -501,7 +562,8 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 		return nil, err
 	}
 
-	candidates := t.pool.Candidates(now)
+	targetHost := req.URL.Host
+	candidates := t.pool.Candidates(now, targetHost)
 	if len(candidates) == 0 {
 		return nil, errNoUpstreamProxy
 	}
@@ -517,7 +579,7 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
-			if !shouldRetryError(err) {
+			if !shouldRetryError(req.Context(), err) {
 				logger.Printf("proxy failed target=%s via=%s err=%v", req.URL.String(), candidate.key, err)
 				return nil, err
 			}
@@ -537,7 +599,7 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 			continue
 		}
 
-		t.pool.MarkSuccess(candidate.key)
+		t.pool.MarkSuccess(candidate.key, targetHost)
 		logger.Printf("proxy success target=%s via=%s status=%d", req.URL.String(), candidate.key, resp.StatusCode)
 		return resp, nil
 	}
@@ -622,8 +684,12 @@ func isHealthyProxyStatus(statusCode int) bool {
 	return statusCode >= http.StatusOK && statusCode < http.StatusBadRequest
 }
 
-func shouldRetryError(err error) bool {
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+func shouldRetryError(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+
+	return !errors.Is(err, context.Canceled)
 }
 
 func parseProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*proxyState, error) {
@@ -700,6 +766,19 @@ func cloneAllowedProtocols(allowedProtocols map[string]struct{}) map[string]stru
 	cloned := make(map[string]struct{}, len(allowedProtocols))
 	for protocol := range allowedProtocols {
 		cloned[protocol] = struct{}{}
+	}
+
+	return cloned
+}
+
+func cloneVerifiedHosts(verifiedHosts map[string]time.Time) map[string]time.Time {
+	if len(verifiedHosts) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]time.Time, len(verifiedHosts))
+	for host, verifiedAt := range verifiedHosts {
+		cloned[host] = verifiedAt
 	}
 
 	return cloned

@@ -99,7 +99,7 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 		},
 	}
 
-	first := pool.Candidates(time.Now())
+	first := pool.Candidates(time.Now(), "")
 	if len(first) != 3 {
 		t.Fatalf("expected 3 candidates, got %d", len(first))
 	}
@@ -107,7 +107,7 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 		t.Fatalf("unexpected first candidate order: %q, %q, %q", first[0].key, first[1].key, first[2].key)
 	}
 
-	second := pool.Candidates(time.Now())
+	second := pool.Candidates(time.Now(), "")
 	if second[0].key != "http://2.2.2.2:80" || second[1].key != "http://3.3.3.3:80" || second[2].key != "http://1.1.1.1:80" {
 		t.Fatalf("unexpected second candidate order: %q, %q, %q", second[0].key, second[1].key, second[2].key)
 	}
@@ -117,16 +117,92 @@ func TestProxyPoolCandidatesPreferHealthyThenUntestedThenRetryThenCooling(t *tes
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
-			{key: "http://healthy:80", url: mustParseURL(t, "http://healthy:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
+			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-30 * time.Second)},
+			{key: "http://probed:80", url: mustParseURL(t, "http://probed:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
 			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
 			{key: "http://retry:80", url: mustParseURL(t, "http://retry:80"), lastChecked: now.Add(-time.Minute)},
 			{key: "http://cooling:80", url: mustParseURL(t, "http://cooling:80"), unavailableUntil: now.Add(time.Minute)},
 		},
 	}
 
-	candidates := pool.Candidates(now)
-	got := []string{candidates[0].key, candidates[1].key, candidates[2].key, candidates[3].key}
-	want := []string{"http://healthy:80", "http://untested:80", "http://retry:80", "http://cooling:80"}
+	candidates := pool.Candidates(now, "")
+	got := []string{candidates[0].key, candidates[1].key, candidates[2].key, candidates[3].key, candidates[4].key}
+	want := []string{"http://verified:80", "http://probed:80", "http://untested:80", "http://retry:80", "http://cooling:80"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidate order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRotatingProxyTransportRetriesAttemptTimeoutWhenRequestContextAlive(t *testing.T) {
+	pool := &ProxyPool{
+		failureCooldown: time.Minute,
+		lastRefresh:     time.Now(),
+		proxies: []*proxyState{
+			{key: "http://slow:80", url: mustParseURL(t, "http://slow:80")},
+			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
+		},
+	}
+
+	transport := &RotatingProxyTransport{
+		pool: pool,
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			switch proxyURL.Host {
+			case "slow:80":
+				return nil, context.DeadlineExceeded
+			case "good:80":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			default:
+				return nil, errors.New("unexpected proxy")
+			}
+		}),
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://example.com/path", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest returned error: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 response, got %d", resp.StatusCode)
+	}
+	if pool.proxies[0].unavailableUntil.IsZero() {
+		t.Fatalf("expected timeout proxy to enter cooldown")
+	}
+	if !pool.proxies[1].healthy || pool.proxies[1].verifiedAt.IsZero() {
+		t.Fatalf("expected second proxy to be marked verified after real success")
+	}
+	if _, ok := pool.proxies[1].verifiedHosts["example.com"]; !ok {
+		t.Fatalf("expected second proxy to be verified for example.com")
+	}
+}
+
+func TestProxyPoolCandidatesPreferVerifiedHostFirst(t *testing.T) {
+	now := time.Now()
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "http://global:80", url: mustParseURL(t, "http://global:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-time.Minute)},
+			{key: "http://host:80", url: mustParseURL(t, "http://host:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-time.Minute), verifiedHosts: map[string]time.Time{"opencode.ai": now.Add(-time.Minute)}},
+			{key: "http://probed:80", url: mustParseURL(t, "http://probed:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
+		},
+	}
+
+	candidates := pool.Candidates(now, "opencode.ai")
+	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
+	want := []string{"http://host:80", "http://global:80", "http://probed:80"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("candidate order = %v, want %v", got, want)
@@ -346,6 +422,9 @@ func TestProxyPoolMaintainOnceChecksAndPromotesHealthyProxies(t *testing.T) {
 
 	if !pool.proxies[0].healthy {
 		t.Fatalf("expected healthy proxy to be promoted")
+	}
+	if !pool.proxies[0].verifiedAt.IsZero() {
+		t.Fatalf("expected probe-only success to avoid verified state")
 	}
 	if pool.proxies[0].lastChecked.IsZero() {
 		t.Fatalf("expected healthy proxy check timestamp to be recorded")
