@@ -6,8 +6,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"sort"
-	"strings"
 	"time"
 )
 
@@ -33,89 +31,19 @@ func main() {
 }
 
 func newUpstreamTransport(logger *log.Logger) http.RoundTripper {
-	allowedProtocols, invalidValues := parseProxyProtocolConfig(os.Getenv("PROXY"))
-	if len(invalidValues) > 0 {
-		logger.Printf("Ignoring unknown PROXY values: %s", strings.Join(invalidValues, ","))
+	if logger == nil {
+		logger = log.Default()
 	}
 
-	if len(allowedProtocols) == 0 {
-		logger.Printf("Upstream proxy mode disabled")
-		return nil
-	}
-
+	allowedProtocols := allowedProxyProtocols("socks5", "https", "http")
 	pool := NewProxyPool(logger, allowedProtocols)
 	if err := pool.Refresh(context.Background()); err != nil {
-		logger.Printf("Initial proxy list refresh failed: %v", err)
+		logger.Printf("Initial proxy list refresh failed, fallback proxy list unavailable: %v", err)
 	} else {
-		logger.Printf("Loaded %d upstream proxies", pool.Count())
+		logger.Printf("Loaded %d fallback upstream proxies", pool.Count())
 	}
-	pool.StartBackgroundMaintenance(context.Background())
 
-	logger.Printf("Upstream proxy mode enabled for protocols: %s", strings.Join(sortedProxyProtocols(allowedProtocols), ","))
+	logger.Printf("Upstream proxy fallback enabled with priority: socks5,https,http")
 
 	return NewRotatingProxyTransport(pool)
-}
-
-func proxyEnabled(value string) bool {
-	return len(parseProxyProtocols(value)) > 0
-}
-
-func parseProxyProtocols(value string) map[string]struct{} {
-	allowed, _ := parseProxyProtocolConfig(value)
-	return allowed
-}
-
-func parseProxyProtocolConfig(value string) (map[string]struct{}, []string) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-
-	allowed := make(map[string]struct{})
-	hasNone := false
-	seenInvalid := make(map[string]struct{})
-	invalid := make([]string, 0)
-	for _, part := range strings.Split(value, ",") {
-		part = strings.ToLower(strings.TrimSpace(part))
-		switch part {
-		case "", "none":
-			hasNone = true
-		case "all":
-			allowProxyProtocols(allowed, "http", "https", "socks5")
-		case "sock":
-			allowProxyProtocols(allowed, "socks5")
-		case "http":
-			allowProxyProtocols(allowed, "http", "https")
-		default:
-			if _, ok := seenInvalid[part]; !ok {
-				seenInvalid[part] = struct{}{}
-				invalid = append(invalid, part)
-			}
-		}
-	}
-
-	if hasNone {
-		return nil, invalid
-	}
-
-	if len(allowed) == 0 {
-		return nil, invalid
-	}
-
-	return allowed, invalid
-}
-
-func allowProxyProtocols(allowed map[string]struct{}, protocols ...string) {
-	for _, protocol := range protocols {
-		allowed[protocol] = struct{}{}
-	}
-}
-
-func sortedProxyProtocols(allowed map[string]struct{}) []string {
-	protocols := make([]string, 0, len(allowed))
-	for protocol := range allowed {
-		protocols = append(protocols, protocol)
-	}
-	sort.Strings(protocols)
-	return protocols
 }

@@ -5,14 +5,22 @@ Proxy server with URL rewriting.
 ## Usage
 
 ```bash
-# optional: PROXY=none|http|sock|all
 docker run \
   -p 8080:8080 \
-  -e PROXY=none \
   ghcr.io/sachnun/unroxy
 
 curl http://localhost:8080/example.com
 ```
+
+Requests go direct to the target origin by default.
+
+If the target host responds with `403` or `429`, Unroxy marks that host as restricted for a short time and retries through upstream proxies.
+
+Fallback proxy priority is:
+
+1. `socks5`
+2. `https`
+3. `http`
 
 ## Development
 
