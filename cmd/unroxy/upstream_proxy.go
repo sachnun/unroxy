@@ -24,6 +24,11 @@ const (
 	proxyFetchTimeout    = 30 * time.Second
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
+	proxyMaintenanceTick = 30 * time.Second
+	proxyHealthTimeout   = 8 * time.Second
+	proxyHealthBatchSize = 16
+	proxyHealthWorkers   = 4
+	proxyHealthCheckURL  = "https://www.gstatic.com/generate_204"
 )
 
 var errNoUpstreamProxy = errors.New("no upstream proxies available")
@@ -38,6 +43,8 @@ type proxyState struct {
 	key              string
 	url              *url.URL
 	unavailableUntil time.Time
+	healthy          bool
+	lastChecked      time.Time
 }
 
 type proxyCandidate struct {
@@ -51,12 +58,20 @@ type ProxyPool struct {
 	sourceURL        string
 	failureCooldown  time.Duration
 	allowedProtocols map[string]struct{}
+	maintenanceTick  time.Duration
+	healthTimeout    time.Duration
+	healthBatchSize  int
+	healthWorkers    int
+	healthCheckURL   string
+	healthTransport  http.RoundTripper
 
-	refreshMu   sync.Mutex
-	mu          sync.RWMutex
-	proxies     []*proxyState
-	lastRefresh time.Time
-	next        int
+	refreshMu      sync.Mutex
+	backgroundOnce sync.Once
+	mu             sync.RWMutex
+	proxies        []*proxyState
+	lastRefresh    time.Time
+	next           int
+	healthNext     int
 }
 
 func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *ProxyPool {
@@ -70,6 +85,12 @@ func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *Pro
 		sourceURL:        upstreamProxyListURL,
 		failureCooldown:  proxyFailureCooldown,
 		allowedProtocols: cloneAllowedProtocols(allowedProtocols),
+		maintenanceTick:  proxyMaintenanceTick,
+		healthTimeout:    proxyHealthTimeout,
+		healthBatchSize:  proxyHealthBatchSize,
+		healthWorkers:    proxyHealthWorkers,
+		healthCheckURL:   proxyHealthCheckURL,
+		healthTransport:  newProxyAwareTransport(),
 	}
 }
 
@@ -110,6 +131,8 @@ func (p *ProxyPool) Refresh(ctx context.Context) error {
 	for _, state := range states {
 		if old, ok := previous[state.key]; ok {
 			state.unavailableUntil = old.unavailableUntil
+			state.healthy = old.healthy
+			state.lastChecked = old.lastChecked
 		}
 	}
 
@@ -126,6 +149,50 @@ func (p *ProxyPool) Refresh(ctx context.Context) error {
 
 	if p.next >= len(states) {
 		p.next = 0
+	}
+	if p.healthNext >= len(states) {
+		p.healthNext = 0
+	}
+
+	return nil
+}
+
+func (p *ProxyPool) StartBackgroundMaintenance(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	p.backgroundOnce.Do(func() {
+		go func() {
+			if err := p.MaintainOnce(ctx, time.Now()); err != nil {
+				p.logf("proxy maintenance failed: %v", err)
+			}
+
+			ticker := time.NewTicker(p.maintenanceTick)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-ticker.C:
+					if err := p.MaintainOnce(ctx, now); err != nil {
+						p.logf("proxy maintenance failed: %v", err)
+					}
+				}
+			}
+		}()
+	})
+}
+
+func (p *ProxyPool) MaintainOnce(ctx context.Context, now time.Time) error {
+	if err := p.EnsureFresh(ctx, now); err != nil {
+		return err
+	}
+
+	checked, healthy, failed := p.checkProxyHealth(ctx, now)
+	if checked > 0 {
+		p.logf("proxy maintenance checked=%d healthy=%d failed=%d pool=%d", checked, healthy, failed, p.Count())
 	}
 
 	return nil
@@ -150,7 +217,7 @@ func (p *ProxyPool) EnsureFresh(ctx context.Context, now time.Time) error {
 		p.mu.RUnlock()
 
 		if hasCachedProxies {
-			p.logger.Printf("proxy list refresh failed, using cached list from %s: %v", lastRefresh.Format(time.RFC3339), err)
+			p.logf("proxy list refresh failed, using cached list from %s: %v", lastRefresh.Format(time.RFC3339), err)
 			return nil
 		}
 
@@ -178,25 +245,36 @@ func (p *ProxyPool) Candidates(now time.Time) []proxyCandidate {
 	start := p.next
 	p.next = (p.next + 1) % len(p.proxies)
 
-	preferred := make([]proxyCandidate, 0, len(p.proxies))
-	fallback := make([]proxyCandidate, 0, len(p.proxies))
+	healthy := make([]proxyCandidate, 0, len(p.proxies))
+	untested := make([]proxyCandidate, 0, len(p.proxies))
+	retry := make([]proxyCandidate, 0, len(p.proxies))
+	cooling := make([]proxyCandidate, 0, len(p.proxies))
 
 	for i := 0; i < len(p.proxies); i++ {
 		state := p.proxies[(start+i)%len(p.proxies)]
 
 		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
 		if now.Before(state.unavailableUntil) {
-			fallback = append(fallback, candidate)
-		} else {
-			preferred = append(preferred, candidate)
+			cooling = append(cooling, candidate)
+			continue
+		}
+
+		switch {
+		case state.healthy:
+			healthy = append(healthy, candidate)
+		case state.lastChecked.IsZero():
+			untested = append(untested, candidate)
+		default:
+			retry = append(retry, candidate)
 		}
 	}
 
-	if len(preferred) == 0 {
-		return fallback
-	}
-
-	return append(preferred, fallback...)
+	ordered := make([]proxyCandidate, 0, len(p.proxies))
+	ordered = append(ordered, healthy...)
+	ordered = append(ordered, untested...)
+	ordered = append(ordered, retry...)
+	ordered = append(ordered, cooling...)
+	return ordered
 }
 
 func (p *ProxyPool) MarkSuccess(key string) {
@@ -208,6 +286,8 @@ func (p *ProxyPool) MarkSuccess(key string) {
 			continue
 		}
 
+		state.healthy = true
+		state.lastChecked = time.Now()
 		state.unavailableUntil = time.Time{}
 		return
 	}
@@ -222,6 +302,8 @@ func (p *ProxyPool) MarkFailure(key string) {
 			continue
 		}
 
+		state.healthy = false
+		state.lastChecked = time.Now()
 		state.unavailableUntil = time.Now().Add(p.failureCooldown)
 		return
 	}
@@ -231,6 +313,159 @@ func (p *ProxyPool) Count() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.proxies)
+}
+
+func (p *ProxyPool) logf(format string, args ...any) {
+	logger := p.logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf(format, args...)
+}
+
+func (p *ProxyPool) HealthCheckCandidates(now time.Time) []proxyCandidate {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.proxies) == 0 || p.healthBatchSize <= 0 {
+		return nil
+	}
+
+	start := p.healthNext
+	advance := p.healthBatchSize
+	if advance > len(p.proxies) {
+		advance = len(p.proxies)
+	}
+	p.healthNext = (p.healthNext + advance) % len(p.proxies)
+
+	unchecked := make([]proxyCandidate, 0, p.healthBatchSize)
+	retry := make([]proxyCandidate, 0, p.healthBatchSize)
+	staleHealthy := make([]proxyCandidate, 0, p.healthBatchSize)
+
+	for i := 0; i < len(p.proxies); i++ {
+		state := p.proxies[(start+i)%len(p.proxies)]
+		if now.Before(state.unavailableUntil) {
+			continue
+		}
+
+		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
+		switch {
+		case state.lastChecked.IsZero():
+			unchecked = append(unchecked, candidate)
+		case !state.healthy:
+			retry = append(retry, candidate)
+		case now.Sub(state.lastChecked) >= p.maintenanceTick:
+			staleHealthy = append(staleHealthy, candidate)
+		}
+	}
+
+	selected := make([]proxyCandidate, 0, p.healthBatchSize)
+	for _, group := range [][]proxyCandidate{unchecked, retry, staleHealthy} {
+		for _, candidate := range group {
+			selected = append(selected, candidate)
+			if len(selected) == p.healthBatchSize {
+				return selected
+			}
+		}
+	}
+
+	return selected
+}
+
+func (p *ProxyPool) checkProxyHealth(ctx context.Context, now time.Time) (int, int, int) {
+	candidates := p.HealthCheckCandidates(now)
+	if len(candidates) == 0 {
+		return 0, 0, 0
+	}
+
+	workers := p.healthWorkers
+	if workers < 1 {
+		workers = 1
+	}
+
+	transport := p.healthTransport
+	if transport == nil {
+		transport = newProxyAwareTransport()
+	}
+
+	results := make(chan bool, len(candidates))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, workers)
+
+	for _, candidate := range candidates {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(candidate proxyCandidate) {
+			defer wg.Done()
+			defer func() {
+				<-sem
+			}()
+
+			healthy, checked := p.checkProxyCandidate(ctx, transport, candidate)
+			if !checked {
+				return
+			}
+
+			results <- healthy
+		}(candidate)
+	}
+
+	wg.Wait()
+	close(results)
+
+	healthy := 0
+	failed := 0
+	for result := range results {
+		if result {
+			healthy++
+			continue
+		}
+
+		failed++
+	}
+
+	return healthy + failed, healthy, failed
+}
+
+func (p *ProxyPool) checkProxyCandidate(ctx context.Context, transport http.RoundTripper, candidate proxyCandidate) (bool, bool) {
+	if ctx != nil && ctx.Err() != nil {
+		return false, false
+	}
+
+	checkCtx := context.Background()
+	if ctx != nil {
+		checkCtx = ctx
+	}
+
+	checkCtx, cancel := context.WithTimeout(checkCtx, p.healthTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, p.healthCheckURL, nil)
+	if err != nil {
+		return false, false
+	}
+
+	req = cloneRequestForProxy(req, candidate.url, nil, false)
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
+
+		p.MarkFailure(candidate.key)
+		return false, true
+	}
+	defer resp.Body.Close()
+
+	io.Copy(io.Discard, resp.Body)
+	if isHealthyProxyStatus(resp.StatusCode) {
+		p.MarkSuccess(candidate.key)
+		return true, true
+	}
+
+	p.MarkFailure(candidate.key)
+	return false, true
 }
 
 type RotatingProxyTransport struct {
@@ -383,6 +618,10 @@ func shouldRetryStatus(statusCode int) bool {
 	return statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests
 }
 
+func isHealthyProxyStatus(statusCode int) bool {
+	return statusCode >= http.StatusOK && statusCode < http.StatusBadRequest
+}
+
 func shouldRetryError(err error) bool {
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
@@ -404,6 +643,9 @@ func parseProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*pro
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			continue
 		}
+		if !supportsProxyScheme(parsed.Scheme) {
+			continue
+		}
 
 		key := parsed.String()
 		if _, ok := seen[key]; ok {
@@ -423,8 +665,31 @@ func isAllowedProxyEntry(entry upstreamProxyEntry, allowedProtocols map[string]s
 	}
 
 	protocol := strings.ToLower(strings.TrimSpace(entry.Protocol))
-	_, ok := allowedProtocols[protocol]
-	return ok
+	switch protocol {
+	case "http":
+		if !entry.HTTPS {
+			return false
+		}
+		_, ok := allowedProtocols["http"]
+		return ok
+	case "https":
+		_, ok := allowedProtocols["https"]
+		return ok
+	case "socks5", "socks5h":
+		_, ok := allowedProtocols["socks5"]
+		return ok
+	default:
+		return false
+	}
+}
+
+func supportsProxyScheme(scheme string) bool {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http", "https", "socks5", "socks5h":
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneAllowedProtocols(allowedProtocols map[string]struct{}) map[string]struct{} {

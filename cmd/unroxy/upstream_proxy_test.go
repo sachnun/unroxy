@@ -13,13 +13,11 @@ import (
 	"time"
 )
 
-func TestParseProxyStates(t *testing.T) {
+func TestParseProxyStatesSockKeepsOnlySocks5(t *testing.T) {
 	body := []byte(`[
 		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false},
-		{"proxy":"socks://5.5.5.5:1080","protocol":"socks","https":false},
+		{"proxy":"socks4://5.5.5.5:1080","protocol":"socks4","https":false},
 		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
-		{"proxy":"http://3.3.3.3:8080","protocol":"http","https":false},
-		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true},
 		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}
 	]`)
 
@@ -28,21 +26,18 @@ func TestParseProxyStates(t *testing.T) {
 		t.Fatalf("parseProxyStates returned error: %v", err)
 	}
 
-	if len(states) != 2 {
-		t.Fatalf("expected 2 states, got %d", len(states))
+	if len(states) != 1 {
+		t.Fatalf("expected 1 state, got %d", len(states))
 	}
-
-	if states[0].key != "socks5://1.1.1.1:1080" && states[1].key != "socks5://1.1.1.1:1080" {
-		t.Fatalf("expected filtered list to keep socks5 proxy")
-	}
-	if states[0].key != "socks://5.5.5.5:1080" && states[1].key != "socks://5.5.5.5:1080" {
-		t.Fatalf("expected filtered list to keep socks proxy")
+	if states[0].key != "socks5://1.1.1.1:1080" {
+		t.Fatalf("expected filtered list to keep socks5 proxy, got %q", states[0].key)
 	}
 }
 
-func TestParseProxyStatesHTTPIncludesHTTPS(t *testing.T) {
+func TestParseProxyStatesHTTPRequiresHTTPSSupport(t *testing.T) {
 	body := []byte(`[
 		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
+		{"proxy":"http://3.3.3.3:8080","protocol":"http","https":false},
 		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true},
 		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}
 	]`)
@@ -56,19 +51,24 @@ func TestParseProxyStatesHTTPIncludesHTTPS(t *testing.T) {
 		t.Fatalf("expected 2 states, got %d", len(states))
 	}
 
-	if states[0].key != "http://2.2.2.2:8080" && states[1].key != "http://2.2.2.2:8080" {
-		t.Fatalf("expected filtered list to keep http proxy")
+	keys := []string{states[0].key, states[1].key}
+	if !containsString(keys, "http://2.2.2.2:8080") {
+		t.Fatalf("expected filtered list to keep https-capable http proxy, got %v", keys)
 	}
-	if states[0].key != "https://4.4.4.4:8443" && states[1].key != "https://4.4.4.4:8443" {
-		t.Fatalf("expected filtered list to keep https proxy")
+	if !containsString(keys, "https://4.4.4.4:8443") {
+		t.Fatalf("expected filtered list to keep https proxy, got %v", keys)
+	}
+	if containsString(keys, "http://3.3.3.3:8080") {
+		t.Fatalf("expected non-https http proxy to be excluded, got %v", keys)
 	}
 }
 
-func TestParseProxyStatesAllIncludesSupportedProtocols(t *testing.T) {
+func TestParseProxyStatesAllIncludesSupportedUsableProtocols(t *testing.T) {
 	body := []byte(`[
 		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false},
-		{"proxy":"socks://5.5.5.5:1080","protocol":"socks","https":false},
+		{"proxy":"socks4://5.5.5.5:1080","protocol":"socks4","https":false},
 		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
+		{"proxy":"http://3.3.3.3:8080","protocol":"http","https":false},
 		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true}
 	]`)
 
@@ -77,8 +77,16 @@ func TestParseProxyStatesAllIncludesSupportedProtocols(t *testing.T) {
 		t.Fatalf("parseProxyStates returned error: %v", err)
 	}
 
-	if len(states) != 4 {
-		t.Fatalf("expected 4 states, got %d", len(states))
+	if len(states) != 3 {
+		t.Fatalf("expected 3 states, got %d", len(states))
+	}
+
+	keys := []string{states[0].key, states[1].key, states[2].key}
+	if containsString(keys, "socks4://5.5.5.5:1080") {
+		t.Fatalf("expected socks4 proxy to be excluded, got %v", keys)
+	}
+	if containsString(keys, "http://3.3.3.3:8080") {
+		t.Fatalf("expected plain http proxy without https support to be excluded, got %v", keys)
 	}
 }
 
@@ -102,6 +110,27 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 	second := pool.Candidates(time.Now())
 	if second[0].key != "http://2.2.2.2:80" || second[1].key != "http://3.3.3.3:80" || second[2].key != "http://1.1.1.1:80" {
 		t.Fatalf("unexpected second candidate order: %q, %q, %q", second[0].key, second[1].key, second[2].key)
+	}
+}
+
+func TestProxyPoolCandidatesPreferHealthyThenUntestedThenRetryThenCooling(t *testing.T) {
+	now := time.Now()
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "http://healthy:80", url: mustParseURL(t, "http://healthy:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
+			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
+			{key: "http://retry:80", url: mustParseURL(t, "http://retry:80"), lastChecked: now.Add(-time.Minute)},
+			{key: "http://cooling:80", url: mustParseURL(t, "http://cooling:80"), unavailableUntil: now.Add(time.Minute)},
+		},
+	}
+
+	candidates := pool.Candidates(now)
+	got := []string{candidates[0].key, candidates[1].key, candidates[2].key, candidates[3].key}
+	want := []string{"http://healthy:80", "http://untested:80", "http://retry:80", "http://cooling:80"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidate order = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -169,6 +198,9 @@ func TestRotatingProxyTransportRetriesUntilSuccess(t *testing.T) {
 	}
 	if !pool.proxies[2].unavailableUntil.IsZero() {
 		t.Fatalf("expected successful proxy cooldown to be cleared")
+	}
+	if !pool.proxies[2].healthy {
+		t.Fatalf("expected successful proxy to be marked healthy")
 	}
 
 	output := logs.String()
@@ -276,6 +308,56 @@ func TestProxyPoolEnsureFreshKeepsStaleCacheOnRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestProxyPoolMaintainOnceChecksAndPromotesHealthyProxies(t *testing.T) {
+	pool := NewProxyPool(log.New(io.Discard, "", 0), parseProxyProtocols("all"))
+	pool.healthBatchSize = 8
+	pool.healthWorkers = 1
+	pool.healthTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+		switch proxyURL.Host {
+		case "healthy:80":
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		case "blocked:80":
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		default:
+			return nil, errors.New("unexpected proxy")
+		}
+	})
+	pool.lastRefresh = time.Now()
+	pool.proxies = []*proxyState{
+		{key: "http://healthy:80", url: mustParseURL(t, "http://healthy:80")},
+		{key: "http://blocked:80", url: mustParseURL(t, "http://blocked:80")},
+	}
+
+	now := time.Now()
+	if err := pool.MaintainOnce(context.Background(), now); err != nil {
+		t.Fatalf("MaintainOnce returned error: %v", err)
+	}
+
+	if !pool.proxies[0].healthy {
+		t.Fatalf("expected healthy proxy to be promoted")
+	}
+	if pool.proxies[0].lastChecked.IsZero() {
+		t.Fatalf("expected healthy proxy check timestamp to be recorded")
+	}
+	if pool.proxies[1].healthy {
+		t.Fatalf("expected blocked proxy to remain unhealthy")
+	}
+	if pool.proxies[1].unavailableUntil.IsZero() {
+		t.Fatalf("expected blocked proxy to enter cooldown")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -291,4 +373,14 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	}
 
 	return parsed
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+
+	return false
 }
