@@ -18,18 +18,15 @@ import (
 )
 
 const (
-	upstreamProxyListURL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json"
 	upstreamProxyListTTL = 10 * time.Minute
+	restrictedHostTTL    = 10 * time.Minute
 	proxyFailureCooldown = time.Minute
 	proxyFetchTimeout    = 30 * time.Second
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
-	proxyMaintenanceTick = 30 * time.Second
-	proxyHealthTimeout   = 8 * time.Second
-	proxyHealthBatchSize = 16
-	proxyHealthWorkers   = 4
-	proxyHealthCheckURL  = "https://www.gstatic.com/generate_204"
 )
+
+var upstreamProxyListURL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json"
 
 var errNoUpstreamProxy = errors.New("no upstream proxies available")
 
@@ -60,20 +57,12 @@ type ProxyPool struct {
 	sourceURL        string
 	failureCooldown  time.Duration
 	allowedProtocols map[string]struct{}
-	maintenanceTick  time.Duration
-	healthTimeout    time.Duration
-	healthBatchSize  int
-	healthWorkers    int
-	healthCheckURL   string
-	healthTransport  http.RoundTripper
 
-	refreshMu      sync.Mutex
-	backgroundOnce sync.Once
-	mu             sync.RWMutex
-	proxies        []*proxyState
-	lastRefresh    time.Time
-	next           int
-	healthNext     int
+	refreshMu   sync.Mutex
+	mu          sync.RWMutex
+	proxies     []*proxyState
+	lastRefresh time.Time
+	next        int
 }
 
 func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *ProxyPool {
@@ -87,13 +76,29 @@ func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *Pro
 		sourceURL:        upstreamProxyListURL,
 		failureCooldown:  proxyFailureCooldown,
 		allowedProtocols: cloneAllowedProtocols(allowedProtocols),
-		maintenanceTick:  proxyMaintenanceTick,
-		healthTimeout:    proxyHealthTimeout,
-		healthBatchSize:  proxyHealthBatchSize,
-		healthWorkers:    proxyHealthWorkers,
-		healthCheckURL:   proxyHealthCheckURL,
-		healthTransport:  newProxyAwareTransport(),
 	}
+}
+
+func allowedProxyProtocols(protocols ...string) map[string]struct{} {
+	if len(protocols) == 0 {
+		return nil
+	}
+
+	allowed := make(map[string]struct{}, len(protocols))
+	for _, protocol := range protocols {
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		if protocol == "" {
+			continue
+		}
+
+		allowed[protocol] = struct{}{}
+	}
+
+	if len(allowed) == 0 {
+		return nil
+	}
+
+	return allowed
 }
 
 func (p *ProxyPool) Refresh(ctx context.Context) error {
@@ -153,51 +158,6 @@ func (p *ProxyPool) Refresh(ctx context.Context) error {
 
 	if p.next >= len(states) {
 		p.next = 0
-	}
-	if p.healthNext >= len(states) {
-		p.healthNext = 0
-	}
-
-	return nil
-}
-
-func (p *ProxyPool) StartBackgroundMaintenance(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	p.backgroundOnce.Do(func() {
-		go func() {
-			if err := p.MaintainOnce(ctx, time.Now()); err != nil {
-				p.logf("proxy maintenance failed: %v", err)
-			}
-
-			ticker := time.NewTicker(p.maintenanceTick)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case now := <-ticker.C:
-					if err := p.MaintainOnce(ctx, now); err != nil {
-						p.logf("proxy maintenance failed: %v", err)
-					}
-				}
-			}
-		}()
-	})
-}
-
-func (p *ProxyPool) MaintainOnce(ctx context.Context, now time.Time) error {
-	if err := p.EnsureFresh(ctx, now); err != nil {
-		return err
-	}
-
-	checked, healthy, failed := p.checkProxyHealth(ctx, now)
-	if checked > 0 {
-		probeHealthy, verified := p.healthSummary()
-		p.logf("proxy maintenance batch=%d ok=%d failed=%d probe_healthy=%d verified=%d pool=%d", checked, healthy, failed, probeHealthy, verified, p.Count())
 	}
 
 	return nil
@@ -281,21 +241,17 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	}
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
-	ordered = append(ordered, hostVerified...)
-	ordered = append(ordered, verified...)
-	ordered = append(ordered, probed...)
-	ordered = append(ordered, untested...)
-	ordered = append(ordered, retry...)
-	ordered = append(ordered, cooling...)
+	ordered = appendCandidatesByProtocolPriority(ordered, hostVerified)
+	ordered = appendCandidatesByProtocolPriority(ordered, verified)
+	ordered = appendCandidatesByProtocolPriority(ordered, probed)
+	ordered = appendCandidatesByProtocolPriority(ordered, untested)
+	ordered = appendCandidatesByProtocolPriority(ordered, retry)
+	ordered = appendCandidatesByProtocolPriority(ordered, cooling)
 	return ordered
 }
 
 func (p *ProxyPool) MarkSuccess(key, targetHost string) {
 	p.markSuccess(key, targetHost, true)
-}
-
-func (p *ProxyPool) MarkProbeSuccess(key string) {
-	p.markSuccess(key, "", false)
 }
 
 func (p *ProxyPool) markSuccess(key, targetHost string, verified bool) {
@@ -357,24 +313,6 @@ func (p *ProxyPool) logf(format string, args ...any) {
 	logger.Printf(format, args...)
 }
 
-func (p *ProxyPool) healthSummary() (int, int) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	probeHealthy := 0
-	verified := 0
-	for _, state := range p.proxies {
-		if state.healthy {
-			probeHealthy++
-		}
-		if !state.verifiedAt.IsZero() {
-			verified++
-		}
-	}
-
-	return probeHealthy, verified
-}
-
 func hasVerifiedHost(state *proxyState, targetHost string) bool {
 	if state == nil || targetHost == "" || len(state.verifiedHosts) == 0 {
 		return false
@@ -384,155 +322,14 @@ func hasVerifiedHost(state *proxyState, targetHost string) bool {
 	return ok
 }
 
-func (p *ProxyPool) HealthCheckCandidates(now time.Time) []proxyCandidate {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if len(p.proxies) == 0 || p.healthBatchSize <= 0 {
-		return nil
-	}
-
-	start := p.healthNext
-	advance := p.healthBatchSize
-	if advance > len(p.proxies) {
-		advance = len(p.proxies)
-	}
-	p.healthNext = (p.healthNext + advance) % len(p.proxies)
-
-	unchecked := make([]proxyCandidate, 0, p.healthBatchSize)
-	retry := make([]proxyCandidate, 0, p.healthBatchSize)
-	staleHealthy := make([]proxyCandidate, 0, p.healthBatchSize)
-
-	for i := 0; i < len(p.proxies); i++ {
-		state := p.proxies[(start+i)%len(p.proxies)]
-		if now.Before(state.unavailableUntil) {
-			continue
-		}
-
-		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
-		switch {
-		case state.lastChecked.IsZero():
-			unchecked = append(unchecked, candidate)
-		case !state.healthy:
-			retry = append(retry, candidate)
-		case now.Sub(state.lastChecked) >= p.maintenanceTick:
-			staleHealthy = append(staleHealthy, candidate)
-		}
-	}
-
-	selected := make([]proxyCandidate, 0, p.healthBatchSize)
-	for _, group := range [][]proxyCandidate{unchecked, retry, staleHealthy} {
-		for _, candidate := range group {
-			selected = append(selected, candidate)
-			if len(selected) == p.healthBatchSize {
-				return selected
-			}
-		}
-	}
-
-	return selected
-}
-
-func (p *ProxyPool) checkProxyHealth(ctx context.Context, now time.Time) (int, int, int) {
-	candidates := p.HealthCheckCandidates(now)
-	if len(candidates) == 0 {
-		return 0, 0, 0
-	}
-
-	workers := p.healthWorkers
-	if workers < 1 {
-		workers = 1
-	}
-
-	transport := p.healthTransport
-	if transport == nil {
-		transport = newProxyAwareTransport()
-	}
-
-	results := make(chan bool, len(candidates))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, workers)
-
-	for _, candidate := range candidates {
-		wg.Add(1)
-		sem <- struct{}{}
-
-		go func(candidate proxyCandidate) {
-			defer wg.Done()
-			defer func() {
-				<-sem
-			}()
-
-			healthy, checked := p.checkProxyCandidate(ctx, transport, candidate)
-			if !checked {
-				return
-			}
-
-			results <- healthy
-		}(candidate)
-	}
-
-	wg.Wait()
-	close(results)
-
-	healthy := 0
-	failed := 0
-	for result := range results {
-		if result {
-			healthy++
-			continue
-		}
-
-		failed++
-	}
-
-	return healthy + failed, healthy, failed
-}
-
-func (p *ProxyPool) checkProxyCandidate(ctx context.Context, transport http.RoundTripper, candidate proxyCandidate) (bool, bool) {
-	if ctx != nil && ctx.Err() != nil {
-		return false, false
-	}
-
-	checkCtx := context.Background()
-	if ctx != nil {
-		checkCtx = ctx
-	}
-
-	checkCtx, cancel := context.WithTimeout(checkCtx, p.healthTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, p.healthCheckURL, nil)
-	if err != nil {
-		return false, false
-	}
-
-	req = cloneRequestForProxy(req, candidate.url, nil, false)
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		if ctx != nil && ctx.Err() != nil {
-			return false, false
-		}
-
-		p.MarkFailure(candidate.key)
-		return false, true
-	}
-	defer resp.Body.Close()
-
-	io.Copy(io.Discard, resp.Body)
-	if isHealthyProxyStatus(resp.StatusCode) {
-		p.MarkProbeSuccess(candidate.key)
-		return true, true
-	}
-
-	p.MarkFailure(candidate.key)
-	return false, true
-}
-
 type RotatingProxyTransport struct {
-	logger    *log.Logger
-	pool      *ProxyPool
-	transport http.RoundTripper
+	logger            *log.Logger
+	pool              *ProxyPool
+	transport         http.RoundTripper
+	restrictedHostTTL time.Duration
+
+	mu              sync.Mutex
+	restrictedHosts map[string]time.Time
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -542,35 +339,87 @@ func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
 	}
 
 	return &RotatingProxyTransport{
-		logger:    logger,
-		pool:      pool,
-		transport: newProxyAwareTransport(),
+		logger:            logger,
+		pool:              pool,
+		transport:         newProxyAwareTransport(),
+		restrictedHostTTL: restrictedHostTTL,
 	}
 }
 
 func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	logger := t.logger
-	if logger == nil {
-		logger = log.Default()
-		if t.pool != nil && t.pool.logger != nil {
-			logger = t.pool.logger
-		}
+	body, hasBody, err := snapshotRequestBody(req)
+	if err != nil {
+		return nil, err
 	}
 
+	targetHost := requestTargetHost(req)
+	logger := t.transportLogger()
+	if t.isRestrictedHost(targetHost, time.Now()) {
+		logger.Printf("proxy fallback target=%s reason=host-restricted", req.URL.String())
+		resp, err := t.roundTripViaProxy(req, body, hasBody, targetHost)
+		if err == nil {
+			return resp, nil
+		}
+		if req.Context().Err() != nil {
+			return nil, err
+		}
+
+		resp, err = t.roundTripDirect(req, body, hasBody)
+		if err != nil {
+			return nil, err
+		}
+		if shouldRetryStatus(resp.StatusCode) {
+			logger.Printf("direct retry status target=%s status=%d", req.URL.String(), resp.StatusCode)
+			t.markRestrictedHost(targetHost, time.Now())
+		} else {
+			t.clearRestrictedHost(targetHost)
+		}
+
+		return resp, nil
+	}
+
+	directResp, err := t.roundTripDirect(req, body, hasBody)
+	if err != nil {
+		logger.Printf("direct failed target=%s err=%v", req.URL.String(), err)
+		return nil, err
+	}
+	if !shouldRetryStatus(directResp.StatusCode) {
+		t.clearRestrictedHost(targetHost)
+		return directResp, nil
+	}
+
+	logger.Printf("direct retry status target=%s status=%d", req.URL.String(), directResp.StatusCode)
+	t.markRestrictedHost(targetHost, time.Now())
+
+	proxyResp, err := t.roundTripViaProxy(req, body, hasBody, targetHost)
+	if err == nil {
+		io.Copy(io.Discard, directResp.Body)
+		directResp.Body.Close()
+		return proxyResp, nil
+	}
+
+	return directResp, nil
+}
+
+func (t *RotatingProxyTransport) roundTripDirect(req *http.Request, body []byte, hasBody bool) (*http.Response, error) {
+	attemptReq := cloneRequestForProxy(req, nil, body, hasBody)
+	return t.transport.RoundTrip(attemptReq)
+}
+
+func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byte, hasBody bool, targetHost string) (*http.Response, error) {
+	if t.pool == nil {
+		return nil, errNoUpstreamProxy
+	}
+
+	logger := t.transportLogger()
 	now := time.Now()
 	if err := t.pool.EnsureFresh(req.Context(), now); err != nil {
 		return nil, err
 	}
 
-	targetHost := req.URL.Host
 	candidates := t.pool.Candidates(now, targetHost)
 	if len(candidates) == 0 {
 		return nil, errNoUpstreamProxy
-	}
-
-	body, hasBody, err := snapshotRequestBody(req)
-	if err != nil {
-		return nil, err
 	}
 
 	var lastErr error
@@ -609,6 +458,87 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 	}
 
 	return nil, lastErr
+}
+
+func (t *RotatingProxyTransport) transportLogger() *log.Logger {
+	logger := t.logger
+	if logger == nil {
+		logger = log.Default()
+		if t.pool != nil && t.pool.logger != nil {
+			logger = t.pool.logger
+		}
+	}
+
+	return logger
+}
+
+func (t *RotatingProxyTransport) isRestrictedHost(targetHost string, now time.Time) bool {
+	if targetHost == "" {
+		return false
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	until, ok := t.restrictedHosts[targetHost]
+	if !ok {
+		return false
+	}
+	if now.Before(until) {
+		return true
+	}
+
+	delete(t.restrictedHosts, targetHost)
+	return false
+}
+
+func (t *RotatingProxyTransport) markRestrictedHost(targetHost string, now time.Time) {
+	if targetHost == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.restrictedHosts == nil {
+		t.restrictedHosts = make(map[string]time.Time)
+	}
+	t.restrictedHosts[targetHost] = now.Add(t.restrictedTTL())
+}
+
+func (t *RotatingProxyTransport) clearRestrictedHost(targetHost string) {
+	if targetHost == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.restrictedHosts == nil {
+		return
+	}
+	delete(t.restrictedHosts, targetHost)
+}
+
+func (t *RotatingProxyTransport) restrictedTTL() time.Duration {
+	if t.restrictedHostTTL > 0 {
+		return t.restrictedHostTTL
+	}
+
+	return restrictedHostTTL
+}
+
+func requestTargetHost(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+
+	host := strings.ToLower(req.URL.Hostname())
+	if host != "" {
+		return host
+	}
+
+	return strings.ToLower(req.URL.Host)
 }
 
 type proxyContextKey struct{}
@@ -658,7 +588,11 @@ func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
 }
 
 func cloneRequestForProxy(req *http.Request, proxyURL *url.URL, body []byte, hasBody bool) *http.Request {
-	ctx := context.WithValue(req.Context(), proxyContextKey{}, proxyURL)
+	ctx := req.Context()
+	if proxyURL != nil {
+		ctx = context.WithValue(ctx, proxyContextKey{}, proxyURL)
+	}
+
 	attemptReq := req.Clone(ctx)
 
 	if !hasBody {
@@ -676,12 +610,54 @@ func cloneRequestForProxy(req *http.Request, proxyURL *url.URL, body []byte, has
 	return attemptReq
 }
 
-func shouldRetryStatus(statusCode int) bool {
-	return statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests
+func appendCandidatesByProtocolPriority(dst []proxyCandidate, candidates []proxyCandidate) []proxyCandidate {
+	if len(candidates) == 0 {
+		return dst
+	}
+
+	socks := make([]proxyCandidate, 0, len(candidates))
+	https := make([]proxyCandidate, 0, len(candidates))
+	httpCandidates := make([]proxyCandidate, 0, len(candidates))
+	other := make([]proxyCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		switch proxySchemePriority(candidate.url) {
+		case 0:
+			socks = append(socks, candidate)
+		case 1:
+			https = append(https, candidate)
+		case 2:
+			httpCandidates = append(httpCandidates, candidate)
+		default:
+			other = append(other, candidate)
+		}
+	}
+
+	dst = append(dst, socks...)
+	dst = append(dst, https...)
+	dst = append(dst, httpCandidates...)
+	dst = append(dst, other...)
+	return dst
 }
 
-func isHealthyProxyStatus(statusCode int) bool {
-	return statusCode >= http.StatusOK && statusCode < http.StatusBadRequest
+func proxySchemePriority(u *url.URL) int {
+	if u == nil {
+		return 3
+	}
+
+	switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+	case "socks5", "socks5h":
+		return 0
+	case "https":
+		return 1
+	case "http":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func shouldRetryStatus(statusCode int) bool {
+	return statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests
 }
 
 func shouldRetryError(ctx context.Context, err error) bool {
