@@ -41,10 +41,10 @@ func TestParseProxyProtocols(t *testing.T) {
 	}{
 		{name: "disabled when empty", value: "", expected: nil},
 		{name: "disabled when none", value: "none", expected: nil},
-		{name: "all expands all protocols", value: "all", expected: []string{"http", "https", "socks", "socks5"}},
-		{name: "sock expands socks protocols", value: "sock", expected: []string{"socks", "socks5"}},
+		{name: "all expands all supported protocols", value: "all", expected: []string{"http", "https", "socks5"}},
+		{name: "sock maps to socks5", value: "sock", expected: []string{"socks5"}},
 		{name: "http expands http protocols", value: "http", expected: []string{"http", "https"}},
-		{name: "csv merges protocols", value: "sock,http", expected: []string{"http", "https", "socks", "socks5"}},
+		{name: "csv merges protocols", value: "sock,http", expected: []string{"http", "https", "socks5"}},
 		{name: "none mixed with http stays disabled", value: "none,http", expected: nil},
 	}
 

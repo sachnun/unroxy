@@ -49,6 +49,7 @@ func newUpstreamTransport(logger *log.Logger) http.RoundTripper {
 	} else {
 		logger.Printf("Loaded %d upstream proxies", pool.Count())
 	}
+	pool.StartBackgroundMaintenance(context.Background())
 
 	logger.Printf("Upstream proxy mode enabled for protocols: %s", strings.Join(sortedProxyProtocols(allowedProtocols), ","))
 
@@ -80,9 +81,9 @@ func parseProxyProtocolConfig(value string) (map[string]struct{}, []string) {
 		case "", "none":
 			hasNone = true
 		case "all":
-			allowProxyProtocols(allowed, "socks", "socks5", "http", "https")
+			allowProxyProtocols(allowed, "http", "https", "socks5")
 		case "sock":
-			allowProxyProtocols(allowed, "socks", "socks5")
+			allowProxyProtocols(allowed, "socks5")
 		case "http":
 			allowProxyProtocols(allowed, "http", "https")
 		default:
