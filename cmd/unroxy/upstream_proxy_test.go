@@ -34,19 +34,46 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 	}
 }
 
-func TestProxyPoolCandidatesRoundRobinReadyThenCooling(t *testing.T) {
-	now := time.Now()
+func TestProxyPoolCandidatesRoundRobinPerHost(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
-			{key: "http://cooling:80", url: mustParseURL(t, "http://cooling:80"), unavailableUntil: now.Add(time.Minute)},
-			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-30 * time.Second)},
-			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
+			{key: "http://1.1.1.1:80", url: mustParseURL(t, "http://1.1.1.1:80")},
+			{key: "http://2.2.2.2:80", url: mustParseURL(t, "http://2.2.2.2:80")},
+			{key: "http://3.3.3.3:80", url: mustParseURL(t, "http://3.3.3.3:80")},
 		},
 	}
 
-	candidates := pool.Candidates(now, "")
+	firstIPWho := pool.Candidates(time.Now(), "ipwho.is")
+	firstFavicon := pool.Candidates(time.Now(), "favicon.ico")
+	secondIPWho := pool.Candidates(time.Now(), "ipwho.is")
+
+	if firstIPWho[0].key != "http://1.1.1.1:80" {
+		t.Fatalf("unexpected first ipwho.is proxy %q", firstIPWho[0].key)
+	}
+	if firstFavicon[0].key != "http://1.1.1.1:80" {
+		t.Fatalf("unexpected first favicon proxy %q", firstFavicon[0].key)
+	}
+	if secondIPWho[0].key != "http://2.2.2.2:80" {
+		t.Fatalf("unexpected second ipwho.is proxy %q", secondIPWho[0].key)
+	}
+}
+
+func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
+	now := time.Now()
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "http://failed:80", url: mustParseURL(t, "http://failed:80")},
+			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-30 * time.Second)},
+			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
+		},
+		failedByHost: map[string]map[string]bool{
+			"ipwho.is": {"http://failed:80": true},
+		},
+	}
+
+	candidates := pool.Candidates(now, "ipwho.is")
 	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
-	want := []string{"http://verified:80", "http://untested:80", "http://cooling:80"}
+	want := []string{"http://verified:80", "http://untested:80", "http://failed:80"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("candidate order = %v, want %v", got, want)
@@ -76,7 +103,6 @@ func TestProxyPoolCandidatesPreserveRoundRobinOverProtocolPriority(t *testing.T)
 
 func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	pool := &ProxyPool{
-		failureCooldown: time.Minute,
 		proxies: []*proxyState{
 			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
 		},
@@ -171,8 +197,7 @@ func TestProxyPoolReplaceSwapsProxiesAndPreservesRotationBounds(t *testing.T) {
 func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 	var logs strings.Builder
 	pool := &ProxyPool{
-		logger:          log.New(&logs, "", 0),
-		failureCooldown: time.Minute,
+		logger: log.New(&logs, "", 0),
 		proxies: []*proxyState{
 			{key: "https://blocked:443", url: mustParseURL(t, "https://blocked:443")},
 			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
@@ -235,25 +260,32 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 	if directCalls != 0 {
 		t.Fatalf("expected 0 direct calls, got %d", directCalls)
 	}
-	if !pool.proxies[1].unavailableUntil.IsZero() {
-		t.Fatalf("expected successful proxy cooldown to be cleared")
-	}
 	if !pool.proxies[1].healthy {
 		t.Fatalf("expected successful proxy to be marked healthy")
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "[RETRY] example.com -> blocked (429)") {
+	if !strings.Contains(output, "[RETRY] example.com/path -> blocked (429)") {
 		t.Fatalf("expected retry status log for blocked proxy, got %q", output)
 	}
-	if !strings.Contains(output, "[OK] example.com -> good (200)") {
+	if !strings.Contains(output, "[OK] example.com/path -> good (200)") {
 		t.Fatalf("expected success log for good proxy, got %q", output)
+	}
+}
+
+func TestRequestTargetLogIncludesPathAndQuery(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://ipwho.is/gome?x=xxx", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest returned error: %v", err)
+	}
+
+	if got := requestTargetLog(req); got != "ipwho.is/gome?x=xxx" {
+		t.Fatalf("requestTargetLog() = %q, want %q", got, "ipwho.is/gome?x=xxx")
 	}
 }
 
 func TestRotatingProxyTransportDoesNotRetryProxyError(t *testing.T) {
 	pool := &ProxyPool{
-		failureCooldown: time.Minute,
 		proxies: []*proxyState{
 			{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
 			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
@@ -293,15 +325,15 @@ func TestRotatingProxyTransportDoesNotRetryProxyError(t *testing.T) {
 	if proxyCalls != 1 {
 		t.Fatalf("expected 1 proxy call, got %d", proxyCalls)
 	}
-	if pool.proxies[0].unavailableUntil.IsZero() {
-		t.Fatalf("expected proxy error to mark cooldown")
+	failed := pool.failedByHost["example.com"]["socks5://bad:1080"]
+	if !failed {
+		t.Fatalf("expected proxy error to move proxy behind healthy candidates")
 	}
 }
 
 func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 	transport := &RotatingProxyTransport{
 		pool: &ProxyPool{
-			failureCooldown: time.Minute,
 			proxies: []*proxyState{
 				{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
 			},
@@ -332,7 +364,6 @@ func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 
 func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	pool := &ProxyPool{
-		failureCooldown: time.Minute,
 		proxies: []*proxyState{
 			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
 		},

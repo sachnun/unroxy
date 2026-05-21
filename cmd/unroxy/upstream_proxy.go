@@ -17,7 +17,6 @@ import (
 )
 
 const (
-	proxyFailureCooldown = time.Minute
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
 	webshareRefreshEvery = 6 * time.Hour
@@ -32,13 +31,12 @@ var (
 )
 
 type proxyState struct {
-	key              string
-	url              *url.URL
-	unavailableUntil time.Time
-	healthy          bool
-	lastChecked      time.Time
-	verifiedAt       time.Time
-	verifiedHosts    map[string]time.Time
+	key           string
+	url           *url.URL
+	healthy       bool
+	lastChecked   time.Time
+	verifiedAt    time.Time
+	verifiedHosts map[string]time.Time
 }
 
 type proxyCandidate struct {
@@ -47,12 +45,13 @@ type proxyCandidate struct {
 }
 
 type ProxyPool struct {
-	logger          *log.Logger
-	failureCooldown time.Duration
+	logger *log.Logger
 
-	mu      sync.RWMutex
-	proxies []*proxyState
-	next    int
+	mu           sync.RWMutex
+	proxies      []*proxyState
+	next         int
+	nextByHost   map[string]int
+	failedByHost map[string]map[string]bool
 }
 
 func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
@@ -61,9 +60,8 @@ func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
 	}
 
 	return &ProxyPool{
-		logger:          logger,
-		failureCooldown: proxyFailureCooldown,
-		proxies:         cloneProxyStates(proxies),
+		logger:  logger,
+		proxies: cloneProxyStates(proxies),
 	}
 }
 
@@ -303,17 +301,27 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	}
 
 	start := p.next
-	p.next = (p.next + 1) % len(p.proxies)
+	rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
+	if rotationKey == "" {
+		p.next = (start + 1) % len(p.proxies)
+	} else {
+		if p.nextByHost == nil {
+			p.nextByHost = make(map[string]int)
+		}
+		start = p.nextByHost[rotationKey] % len(p.proxies)
+		p.nextByHost[rotationKey] = (start + 1) % len(p.proxies)
+	}
 
 	ready := make([]proxyCandidate, 0, len(p.proxies))
-	cooling := make([]proxyCandidate, 0, len(p.proxies))
+	failed := make([]proxyCandidate, 0, len(p.proxies))
+	failedKeys := p.failedByHost[rotationKey]
 
 	for i := 0; i < len(p.proxies); i++ {
 		state := p.proxies[(start+i)%len(p.proxies)]
 
 		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
-		if now.Before(state.unavailableUntil) {
-			cooling = append(cooling, candidate)
+		if failedKeys[state.key] {
+			failed = append(failed, candidate)
 			continue
 		}
 
@@ -322,7 +330,7 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
 	ordered = append(ordered, ready...)
-	ordered = append(ordered, cooling...)
+	ordered = append(ordered, failed...)
 	return ordered
 }
 
@@ -351,12 +359,12 @@ func (p *ProxyPool) markSuccess(key, targetHost string, verified bool) {
 				state.verifiedHosts[targetHost] = now
 			}
 		}
-		state.unavailableUntil = time.Time{}
+		delete(p.failedByHost[strings.ToLower(strings.TrimSpace(targetHost))], key)
 		return
 	}
 }
 
-func (p *ProxyPool) MarkFailure(key string) {
+func (p *ProxyPool) MarkFailure(key, targetHost string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -370,7 +378,16 @@ func (p *ProxyPool) MarkFailure(key string) {
 		state.lastChecked = now
 		state.verifiedAt = time.Time{}
 		state.verifiedHosts = nil
-		state.unavailableUntil = now.Add(p.failureCooldown)
+		rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
+		if rotationKey != "" {
+			if p.failedByHost == nil {
+				p.failedByHost = make(map[string]map[string]bool)
+			}
+			if p.failedByHost[rotationKey] == nil {
+				p.failedByHost[rotationKey] = make(map[string]bool)
+			}
+			p.failedByHost[rotationKey][key] = true
+		}
 		return
 	}
 }
@@ -437,6 +454,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	logger := t.transportLogger()
+	targetLog := requestTargetLog(req)
 	now := time.Now()
 	candidates := t.pool.Candidates(now, targetHost)
 	if len(candidates) == 0 {
@@ -448,22 +466,22 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
-			t.pool.MarkFailure(candidate.key)
-			logger.Printf("[ERR] %s -> %s (%v)", targetHost, proxyLogAddress(candidate.url), err)
+			t.pool.MarkFailure(candidate.key, targetHost)
+			logger.Printf("[ERR] %s -> %s (%v)", targetLog, proxyLogAddress(candidate.url), err)
 			return nil, err
 		}
 
 		if shouldRetryStatus(resp.StatusCode) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			t.pool.MarkFailure(candidate.key)
-			logger.Printf("[RETRY] %s -> %s (%d)", targetHost, proxyLogAddress(candidate.url), resp.StatusCode)
+			t.pool.MarkFailure(candidate.key, targetHost)
+			logger.Printf("[RETRY] %s -> %s (%d)", targetLog, proxyLogAddress(candidate.url), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("[OK] %s -> %s (%d)", targetHost, proxyLogAddress(candidate.url), resp.StatusCode)
+		logger.Printf("[OK] %s -> %s (%d)", targetLog, proxyLogAddress(candidate.url), resp.StatusCode)
 		return resp, nil
 	}
 
@@ -510,6 +528,30 @@ func requestTargetHost(req *http.Request) string {
 	}
 
 	return strings.ToLower(req.URL.Host)
+}
+
+func requestTargetLog(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return "-"
+	}
+
+	host := req.URL.Host
+	if hostname := req.URL.Hostname(); hostname != "" {
+		host = hostname
+	}
+	if host == "" {
+		host = "-"
+	}
+
+	path := req.URL.EscapedPath()
+	if path == "" || path == "/" {
+		path = ""
+	}
+	if req.URL.RawQuery != "" {
+		path += "?" + req.URL.RawQuery
+	}
+
+	return strings.ToLower(host) + path
 }
 
 type proxyContextKey struct{}

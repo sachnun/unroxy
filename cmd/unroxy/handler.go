@@ -83,6 +83,7 @@ func (h *ProxyHandler) parseRequest(r *http.Request) (domain, path, query string
 // createProxy creates a configured reverse proxy
 func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
+		ErrorLog:  log.New(io.Discard, "", 0),
 		Transport: h.transport,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "https"
