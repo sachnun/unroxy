@@ -1,128 +1,15 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestParseProxyStatesSockKeepsOnlySocks5(t *testing.T) {
-	body := []byte(`[
-		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false},
-		{"proxy":"socks4://5.5.5.5:1080","protocol":"socks4","https":false},
-		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
-		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}
-	]`)
-
-	states, err := parseProxyStates(body, allowedProxyProtocols("socks5"))
-	if err != nil {
-		t.Fatalf("parseProxyStates returned error: %v", err)
-	}
-
-	if len(states) != 1 {
-		t.Fatalf("expected 1 state, got %d", len(states))
-	}
-	if states[0].key != "socks5://1.1.1.1:1080" {
-		t.Fatalf("expected filtered list to keep socks5 proxy, got %q", states[0].key)
-	}
-}
-
-func TestParseProxyStatesHTTPRequiresHTTPSSupport(t *testing.T) {
-	body := []byte(`[
-		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
-		{"proxy":"http://3.3.3.3:8080","protocol":"http","https":false},
-		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true},
-		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}
-	]`)
-
-	states, err := parseProxyStates(body, allowedProxyProtocols("http", "https"))
-	if err != nil {
-		t.Fatalf("parseProxyStates returned error: %v", err)
-	}
-
-	if len(states) != 2 {
-		t.Fatalf("expected 2 states, got %d", len(states))
-	}
-
-	keys := []string{states[0].key, states[1].key}
-	if !containsString(keys, "http://2.2.2.2:8080") {
-		t.Fatalf("expected filtered list to keep https-capable http proxy, got %v", keys)
-	}
-	if !containsString(keys, "https://4.4.4.4:8443") {
-		t.Fatalf("expected filtered list to keep https proxy, got %v", keys)
-	}
-	if containsString(keys, "http://3.3.3.3:8080") {
-		t.Fatalf("expected non-https http proxy to be excluded, got %v", keys)
-	}
-}
-
-func TestParseProxyStatesAllIncludesSupportedUsableProtocols(t *testing.T) {
-	body := []byte(`[
-		{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false},
-		{"proxy":"socks4://5.5.5.5:1080","protocol":"socks4","https":false},
-		{"proxy":"http://2.2.2.2:8080","protocol":"http","https":true},
-		{"proxy":"http://3.3.3.3:8080","protocol":"http","https":false},
-		{"proxy":"https://4.4.4.4:8443","protocol":"https","https":true}
-	]`)
-
-	states, err := parseProxyStates(body, allowedProxyProtocols("socks5", "https", "http"))
-	if err != nil {
-		t.Fatalf("parseProxyStates returned error: %v", err)
-	}
-
-	if len(states) != 3 {
-		t.Fatalf("expected 3 states, got %d", len(states))
-	}
-
-	keys := []string{states[0].key, states[1].key, states[2].key}
-	if containsString(keys, "socks4://5.5.5.5:1080") {
-		t.Fatalf("expected socks4 proxy to be excluded, got %v", keys)
-	}
-	if containsString(keys, "http://3.3.3.3:8080") {
-		t.Fatalf("expected plain http proxy without https support to be excluded, got %v", keys)
-	}
-}
-
-func TestParseProxyStatesGeonodeFormat(t *testing.T) {
-	body := []byte(`{
-		"data":[
-			{"ip":"1.1.1.1","port":"1080","protocols":["socks5","socks4"]},
-			{"ip":"2.2.2.2","port":"8080","protocols":["http"]},
-			{"ip":"3.3.3.3","port":"8443","protocols":["https"]},
-			{"ip":"1.1.1.1","port":"1080","protocols":["socks5"]}
-		]
-	}`)
-
-	states, err := parseProxyStates(body, allowedProxyProtocols("socks5", "https", "http"))
-	if err != nil {
-		t.Fatalf("parseProxyStates returned error: %v", err)
-	}
-
-	if len(states) != 3 {
-		t.Fatalf("expected 3 states, got %d", len(states))
-	}
-
-	keys := []string{states[0].key, states[1].key, states[2].key}
-	if !containsString(keys, "socks5://1.1.1.1:1080") {
-		t.Fatalf("expected socks5 proxy from Geonode data, got %v", keys)
-	}
-	if !containsString(keys, "http://2.2.2.2:8080") {
-		t.Fatalf("expected http proxy from Geonode data, got %v", keys)
-	}
-	if !containsString(keys, "https://3.3.3.3:8443") {
-		t.Fatalf("expected https proxy from Geonode data, got %v", keys)
-	}
-	if containsString(keys, "socks4://1.1.1.1:1080") {
-		t.Fatalf("expected socks4 proxy to be excluded, got %v", keys)
-	}
-}
 
 func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 	pool := &ProxyPool{
@@ -192,7 +79,6 @@ func TestProxyPoolCandidatesPreferProtocolPriorityWithinTier(t *testing.T) {
 func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	pool := &ProxyPool{
 		failureCooldown: time.Minute,
-		lastRefresh:     time.Now(),
 		proxies: []*proxyState{
 			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
 		},
@@ -266,7 +152,6 @@ func TestRotatingProxyTransportRetriesProxyCandidates(t *testing.T) {
 	pool := &ProxyPool{
 		logger:          log.New(&logs, "", 0),
 		failureCooldown: time.Minute,
-		lastRefresh:     time.Now(),
 		proxies: []*proxyState{
 			{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
 			{key: "https://blocked:443", url: mustParseURL(t, "https://blocked:443")},
@@ -340,16 +225,13 @@ func TestRotatingProxyTransportRetriesProxyCandidates(t *testing.T) {
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "proxy attempt target=https://example.com/path via=socks5://bad:1080") {
-		t.Fatalf("expected attempt log for bad proxy, got %q", output)
-	}
-	if !strings.Contains(output, "proxy failed target=https://example.com/path via=socks5://bad:1080 err=dial failed") {
+	if !strings.Contains(output, "proxy_error web=example.com error=dial failed") {
 		t.Fatalf("expected failure log for bad proxy, got %q", output)
 	}
-	if !strings.Contains(output, "proxy retry status target=https://example.com/path via=https://blocked:443 status=403") {
+	if !strings.Contains(output, "target_status web=example.com status=403") {
 		t.Fatalf("expected retry status log for blocked proxy, got %q", output)
 	}
-	if !strings.Contains(output, "proxy success target=https://example.com/path via=http://good:80 status=200") {
+	if !strings.Contains(output, "connected web=example.com ip=http://good:80") {
 		t.Fatalf("expected success log for good proxy, got %q", output)
 	}
 }
@@ -358,7 +240,6 @@ func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 	transport := &RotatingProxyTransport{
 		pool: &ProxyPool{
 			failureCooldown: time.Minute,
-			lastRefresh:     time.Now(),
 			proxies: []*proxyState{
 				{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
 			},
@@ -390,7 +271,6 @@ func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	pool := &ProxyPool{
 		failureCooldown: time.Minute,
-		lastRefresh:     time.Now(),
 		proxies: []*proxyState{
 			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
 		},
@@ -445,77 +325,6 @@ func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	}
 }
 
-func TestProxyPoolEnsureFreshUsesTTLCache(t *testing.T) {
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `[{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}]`)
-	}))
-	defer server.Close()
-
-	pool := NewProxyPool(log.New(io.Discard, "", 0), allowedProxyProtocols("socks5", "https", "http"))
-	pool.sourceURL = server.URL
-
-	if err := pool.EnsureFresh(context.Background(), time.Now()); err != nil {
-		t.Fatalf("EnsureFresh returned error: %v", err)
-	}
-	if requests != 1 {
-		t.Fatalf("expected first EnsureFresh to fetch once, got %d", requests)
-	}
-
-	pool.mu.RLock()
-	lastRefresh := pool.lastRefresh
-	pool.mu.RUnlock()
-
-	if err := pool.EnsureFresh(context.Background(), lastRefresh.Add(upstreamProxyListTTL-time.Second)); err != nil {
-		t.Fatalf("EnsureFresh within TTL returned error: %v", err)
-	}
-	if requests != 1 {
-		t.Fatalf("expected cached list within TTL, got %d fetches", requests)
-	}
-
-	if err := pool.EnsureFresh(context.Background(), lastRefresh.Add(upstreamProxyListTTL+time.Second)); err != nil {
-		t.Fatalf("EnsureFresh after TTL returned error: %v", err)
-	}
-	if requests != 2 {
-		t.Fatalf("expected refresh after TTL, got %d fetches", requests)
-	}
-}
-
-func TestProxyPoolEnsureFreshKeepsStaleCacheOnRefreshFailure(t *testing.T) {
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if requests > 1 {
-			http.Error(w, "boom", http.StatusBadGateway)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `[{"proxy":"socks5://1.1.1.1:1080","protocol":"socks5","https":false}]`)
-	}))
-	defer server.Close()
-
-	pool := NewProxyPool(log.New(io.Discard, "", 0), allowedProxyProtocols("socks5", "https", "http"))
-	pool.sourceURL = server.URL
-
-	if err := pool.EnsureFresh(context.Background(), time.Now()); err != nil {
-		t.Fatalf("initial EnsureFresh returned error: %v", err)
-	}
-
-	pool.mu.RLock()
-	lastRefresh := pool.lastRefresh
-	pool.mu.RUnlock()
-
-	if err := pool.EnsureFresh(context.Background(), lastRefresh.Add(upstreamProxyListTTL+time.Second)); err != nil {
-		t.Fatalf("expected stale cache reuse, got error: %v", err)
-	}
-	if pool.Count() != 1 {
-		t.Fatalf("expected cached proxies to remain available, got %d", pool.Count())
-	}
-}
-
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -531,14 +340,4 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	}
 
 	return parsed
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-
-	return false
 }

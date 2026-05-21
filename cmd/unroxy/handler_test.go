@@ -140,7 +140,7 @@ func TestNewProxyHandler(t *testing.T) {
 	}
 }
 
-func TestProxyHandlerLogsRequest(t *testing.T) {
+func TestProxyHandlerDoesNotLogRequestDetails(t *testing.T) {
 	var logs strings.Builder
 	logger := log.New(&logs, "", 0)
 	h := NewProxyHandlerWithLoggerAndTransport(logger, roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -158,14 +158,8 @@ func TestProxyHandlerLogsRequest(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	output := logs.String()
-	if !strings.Contains(output, "request method=GET") {
-		t.Fatalf("expected request log, got %q", output)
-	}
-	if !strings.Contains(output, "source=/example.com/search?q=hello") {
-		t.Fatalf("expected source path in log, got %q", output)
-	}
-	if !strings.Contains(output, "target=https://example.com/search?q=hello") {
-		t.Fatalf("expected target URL in log, got %q", output)
+	if output != "" {
+		t.Fatalf("expected no request detail log, got %q", output)
 	}
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", w.Code)

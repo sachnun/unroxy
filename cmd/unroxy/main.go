@@ -1,17 +1,10 @@
 package main
 
 import (
-	"context"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
-	"time"
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 func main() {
 	port := os.Getenv("PORT")
@@ -35,15 +28,13 @@ func newUpstreamTransport(logger *log.Logger) http.RoundTripper {
 		logger = log.Default()
 	}
 
-	allowedProtocols := allowedProxyProtocols("socks5", "https", "http")
-	pool := NewProxyPool(logger, allowedProtocols)
-	if err := pool.Refresh(context.Background()); err != nil {
-		logger.Printf("Initial proxy list refresh failed, proxy list unavailable: %v", err)
-	} else {
-		logger.Printf("Loaded %d upstream proxies", pool.Count())
+	pool, err := NewWebshareProxyPool(logger, os.Getenv(webshareUsernameEnv), os.Getenv(websharePasswordEnv))
+	if err != nil {
+		logger.Printf("Webshare proxy not ready")
+		pool = NewProxyPool(logger, nil)
 	}
 
-	logger.Printf("Upstream proxy mode enabled with priority: socks5,https,http")
+	logger.Printf("Proxy ready: %s:%s", webshareProxyHost, webshareProxyPort)
 
 	return NewRotatingProxyTransport(pool)
 }

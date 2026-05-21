@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,39 +10,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	upstreamProxyListTTL = 10 * time.Minute
 	proxyFailureCooldown = time.Minute
-	proxyFetchTimeout    = 30 * time.Second
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
+	webshareProxyHost    = "p.webshare.io"
+	webshareProxyPort    = "80"
+	webshareUsernameEnv  = "WEBSHARE_USERNAME"
+	websharePasswordEnv  = "WEBSHARE_PASSWORD"
 )
 
-var upstreamProxyListURL = "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc"
-
 var errNoUpstreamProxy = errors.New("no upstream proxies available")
-
-type upstreamProxyEntry struct {
-	Proxy    string `json:"proxy"`
-	Protocol string `json:"protocol"`
-	HTTPS    bool   `json:"https"`
-}
-
-type geonodeProxyListResponse struct {
-	Data []geonodeProxyEntry `json:"data"`
-}
-
-type geonodeProxyEntry struct {
-	IP        string   `json:"ip"`
-	Port      string   `json:"port"`
-	Protocols []string `json:"protocols"`
-}
 
 type proxyState struct {
 	key              string
@@ -61,151 +43,44 @@ type proxyCandidate struct {
 }
 
 type ProxyPool struct {
-	client           *http.Client
-	logger           *log.Logger
-	sourceURL        string
-	failureCooldown  time.Duration
-	allowedProtocols map[string]struct{}
+	logger          *log.Logger
+	failureCooldown time.Duration
 
-	refreshMu   sync.Mutex
-	mu          sync.RWMutex
-	proxies     []*proxyState
-	lastRefresh time.Time
-	next        int
+	mu      sync.RWMutex
+	proxies []*proxyState
+	next    int
 }
 
-func NewProxyPool(logger *log.Logger, allowedProtocols map[string]struct{}) *ProxyPool {
+func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
 	if logger == nil {
 		logger = log.Default()
 	}
 
 	return &ProxyPool{
-		client:           &http.Client{Timeout: proxyFetchTimeout},
-		logger:           logger,
-		sourceURL:        upstreamProxyListURL,
-		failureCooldown:  proxyFailureCooldown,
-		allowedProtocols: cloneAllowedProtocols(allowedProtocols),
+		logger:          logger,
+		failureCooldown: proxyFailureCooldown,
+		proxies:         cloneProxyStates(proxies),
 	}
 }
 
-func allowedProxyProtocols(protocols ...string) map[string]struct{} {
-	if len(protocols) == 0 {
-		return nil
+func NewWebshareProxyPool(logger *log.Logger, username, password string) (*ProxyPool, error) {
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("%s and %s must be set", webshareUsernameEnv, websharePasswordEnv)
 	}
 
-	allowed := make(map[string]struct{}, len(protocols))
-	for _, protocol := range protocols {
-		protocol = strings.ToLower(strings.TrimSpace(protocol))
-		if protocol == "" {
-			continue
-		}
-
-		allowed[protocol] = struct{}{}
+	proxyURL := &url.URL{
+		Scheme: "socks5",
+		User:   url.UserPassword(username, password),
+		Host:   net.JoinHostPort(webshareProxyHost, webshareProxyPort),
+	}
+	state := &proxyState{
+		key: "socks5://" + net.JoinHostPort(webshareProxyHost, webshareProxyPort),
+		url: proxyURL,
 	}
 
-	if len(allowed) == 0 {
-		return nil
-	}
-
-	return allowed
-}
-
-func (p *ProxyPool) Refresh(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.sourceURL, nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected proxy list status: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	states, err := parseProxyStates(body, p.allowedProtocols)
-	if err != nil {
-		return err
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	previous := make(map[string]*proxyState, len(p.proxies))
-	for _, state := range p.proxies {
-		previous[state.key] = state
-	}
-
-	for _, state := range states {
-		if old, ok := previous[state.key]; ok {
-			state.unavailableUntil = old.unavailableUntil
-			state.healthy = old.healthy
-			state.lastChecked = old.lastChecked
-			state.verifiedAt = old.verifiedAt
-			state.verifiedHosts = cloneVerifiedHosts(old.verifiedHosts)
-		}
-	}
-
-	sort.Slice(states, func(i, j int) bool {
-		return states[i].key < states[j].key
-	})
-
-	p.proxies = states
-	p.lastRefresh = time.Now()
-	if len(states) == 0 {
-		p.next = 0
-		return nil
-	}
-
-	if p.next >= len(states) {
-		p.next = 0
-	}
-
-	return nil
-}
-
-func (p *ProxyPool) EnsureFresh(ctx context.Context, now time.Time) error {
-	if !p.needsRefresh(now) {
-		return nil
-	}
-
-	p.refreshMu.Lock()
-	defer p.refreshMu.Unlock()
-
-	if !p.needsRefresh(now) {
-		return nil
-	}
-
-	if err := p.Refresh(ctx); err != nil {
-		p.mu.RLock()
-		hasCachedProxies := len(p.proxies) > 0
-		lastRefresh := p.lastRefresh
-		p.mu.RUnlock()
-
-		if hasCachedProxies {
-			p.logf("proxy list refresh failed, using cached list from %s: %v", lastRefresh.Format(time.RFC3339), err)
-			return nil
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-func (p *ProxyPool) needsRefresh(now time.Time) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	return p.lastRefresh.IsZero() || now.Sub(p.lastRefresh) >= upstreamProxyListTTL
+	return NewProxyPool(logger, []*proxyState{state}), nil
 }
 
 func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidate {
@@ -314,14 +189,6 @@ func (p *ProxyPool) Count() int {
 	return len(p.proxies)
 }
 
-func (p *ProxyPool) logf(format string, args ...any) {
-	logger := p.logger
-	if logger == nil {
-		logger = log.Default()
-	}
-	logger.Printf(format, args...)
-}
-
 func hasVerifiedHost(state *proxyState, targetHost string) bool {
 	if state == nil || targetHost == "" || len(state.verifiedHosts) == 0 {
 		return false
@@ -367,10 +234,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 
 	logger := t.transportLogger()
 	now := time.Now()
-	if err := t.pool.EnsureFresh(req.Context(), now); err != nil {
-		return nil, err
-	}
-
 	candidates := t.pool.Candidates(now, targetHost)
 	if len(candidates) == 0 {
 		return nil, errNoUpstreamProxy
@@ -378,17 +241,16 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 
 	var lastErr error
 	for _, candidate := range candidates {
-		logger.Printf("proxy attempt target=%s via=%s", req.URL.String(), candidate.key)
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
 			if !shouldRetryError(req.Context(), err) {
-				logger.Printf("proxy failed target=%s via=%s err=%v", req.URL.String(), candidate.key, err)
+				logger.Printf("proxy_error web=%s error=%v", targetHost, err)
 				return nil, err
 			}
 
 			t.pool.MarkFailure(candidate.key)
-			logger.Printf("proxy failed target=%s via=%s err=%v", req.URL.String(), candidate.key, err)
+			logger.Printf("proxy_error web=%s error=%v", targetHost, err)
 			lastErr = err
 			continue
 		}
@@ -397,13 +259,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			t.pool.MarkFailure(candidate.key)
-			logger.Printf("proxy retry status target=%s via=%s status=%d", req.URL.String(), candidate.key, resp.StatusCode)
+			logger.Printf("target_status web=%s status=%d", targetHost, resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("proxy success target=%s via=%s status=%d", req.URL.String(), candidate.key, resp.StatusCode)
+		logger.Printf("connected web=%s ip=%s", targetHost, candidate.key)
 		return resp, nil
 	}
 
@@ -566,138 +428,21 @@ func shouldRetryError(ctx context.Context, err error) bool {
 	return !errors.Is(err, context.Canceled)
 }
 
-func parseProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*proxyState, error) {
-	if states, ok, err := parseGeonodeProxyStates(body, allowedProtocols); ok || err != nil {
-		return states, err
-	}
-
-	var entries []upstreamProxyEntry
-	if err := json.Unmarshal(body, &entries); err != nil {
-		return nil, err
-	}
-
-	states := make([]*proxyState, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		if !isAllowedProxyEntry(entry, allowedProtocols) {
-			continue
-		}
-
-		parsed, err := url.Parse(strings.TrimSpace(entry.Proxy))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			continue
-		}
-		if !supportsProxyScheme(parsed.Scheme) {
-			continue
-		}
-
-		key := parsed.String()
-		if _, ok := seen[key]; ok {
-			continue
-		}
-
-		seen[key] = struct{}{}
-		states = append(states, &proxyState{key: key, url: parsed})
-	}
-
-	return states, nil
-}
-
-func parseGeonodeProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*proxyState, bool, error) {
-	var list geonodeProxyListResponse
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, false, nil
-	}
-	if list.Data == nil {
-		return nil, false, nil
-	}
-
-	states := make([]*proxyState, 0, len(list.Data))
-	seen := make(map[string]struct{}, len(list.Data))
-	for _, entry := range list.Data {
-		host := net.JoinHostPort(strings.TrimSpace(entry.IP), strings.TrimSpace(entry.Port))
-		if strings.TrimSpace(entry.IP) == "" || strings.TrimSpace(entry.Port) == "" {
-			continue
-		}
-
-		for _, protocol := range entry.Protocols {
-			protocol = normalizeProxyProtocol(protocol)
-			if !isAllowedGeonodeProtocol(protocol, allowedProtocols) {
-				continue
-			}
-
-			parsed := &url.URL{Scheme: protocol, Host: host}
-			key := parsed.String()
-			if _, ok := seen[key]; ok {
-				continue
-			}
-
-			seen[key] = struct{}{}
-			states = append(states, &proxyState{key: key, url: parsed})
-		}
-	}
-
-	return states, true, nil
-}
-
-func normalizeProxyProtocol(protocol string) string {
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	if protocol == "socks5h" {
-		return "socks5"
-	}
-	return protocol
-}
-
-func isAllowedGeonodeProtocol(protocol string, allowedProtocols map[string]struct{}) bool {
-	if len(allowedProtocols) == 0 || !supportsProxyScheme(protocol) {
-		return false
-	}
-
-	_, ok := allowedProtocols[protocol]
-	return ok
-}
-
-func isAllowedProxyEntry(entry upstreamProxyEntry, allowedProtocols map[string]struct{}) bool {
-	if len(allowedProtocols) == 0 {
-		return false
-	}
-
-	protocol := strings.ToLower(strings.TrimSpace(entry.Protocol))
-	switch protocol {
-	case "http":
-		if !entry.HTTPS {
-			return false
-		}
-		_, ok := allowedProtocols["http"]
-		return ok
-	case "https":
-		_, ok := allowedProtocols["https"]
-		return ok
-	case "socks5", "socks5h":
-		_, ok := allowedProtocols["socks5"]
-		return ok
-	default:
-		return false
-	}
-}
-
-func supportsProxyScheme(scheme string) bool {
-	switch strings.ToLower(strings.TrimSpace(scheme)) {
-	case "http", "https", "socks5", "socks5h":
-		return true
-	default:
-		return false
-	}
-}
-
-func cloneAllowedProtocols(allowedProtocols map[string]struct{}) map[string]struct{} {
-	if len(allowedProtocols) == 0 {
+func cloneProxyStates(proxies []*proxyState) []*proxyState {
+	if len(proxies) == 0 {
 		return nil
 	}
 
-	cloned := make(map[string]struct{}, len(allowedProtocols))
-	for protocol := range allowedProtocols {
-		cloned[protocol] = struct{}{}
+	cloned := make([]*proxyState, 0, len(proxies))
+	for _, proxy := range proxies {
+		if proxy == nil || proxy.url == nil {
+			continue
+		}
+
+		state := *proxy
+		state.url = cloneURL(proxy.url)
+		state.verifiedHosts = cloneVerifiedHosts(proxy.verifiedHosts)
+		cloned = append(cloned, &state)
 	}
 
 	return cloned

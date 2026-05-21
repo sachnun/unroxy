@@ -12,13 +12,18 @@ docker run \
 curl http://localhost:8080/example.com
 ```
 
-Requests to the target origin always use upstream proxies loaded from Geonode.
+Requests to the target origin always use Webshare rotating SOCKS5 through `p.webshare.io:80`.
+
+Set Webshare credentials with:
+
+```bash
+export WEBSHARE_USERNAME=your_username
+export WEBSHARE_PASSWORD=your_password
+```
 
 Proxy priority is:
 
 1. `socks5`
-2. `https`
-3. `http`
 
 ## Development
 
