@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,13 +20,16 @@ const (
 	proxyFailureCooldown = time.Minute
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
-	webshareProxyHost    = "p.webshare.io"
-	webshareProxyPort    = "80"
-	webshareUsernameEnv  = "WEBSHARE_USERNAME"
-	websharePasswordEnv  = "WEBSHARE_PASSWORD"
+	webshareRefreshEvery = 6 * time.Hour
+	webshareAPIKeyEnv    = "API_KEY"
 )
 
-var errNoUpstreamProxy = errors.New("no upstream proxies available")
+var (
+	errNoUpstreamProxy    = errors.New("no upstream proxies available")
+	websharePlansURL      = "https://proxy.webshare.io/api/v2/subscription/plan/"
+	webshareProxyListURL  = "https://proxy.webshare.io/api/v2/proxy/list/"
+	webshareAPIHTTPClient = &http.Client{Timeout: 30 * time.Second}
+)
 
 type proxyState struct {
 	key              string
@@ -63,24 +67,231 @@ func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
 	}
 }
 
-func NewWebshareProxyPool(logger *log.Logger, username, password string) (*ProxyPool, error) {
-	username = strings.TrimSpace(username)
-	password = strings.TrimSpace(password)
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("%s and %s must be set", webshareUsernameEnv, websharePasswordEnv)
+func NewWebshareProxyPool(logger *log.Logger, apiKeyValue string) (*ProxyPool, error) {
+	apiKeys, err := parseWebshareAPIKeys(apiKeyValue)
+	if err != nil {
+		return nil, err
 	}
 
-	proxyURL := &url.URL{
-		Scheme: "socks5",
-		User:   url.UserPassword(username, password),
-		Host:   net.JoinHostPort(webshareProxyHost, webshareProxyPort),
+	proxies, err := fetchWebshareProxyStates(webshareAPIHTTPClient, apiKeys)
+	if err != nil {
+		return nil, err
 	}
-	state := &proxyState{
-		key: "socks5://" + net.JoinHostPort(webshareProxyHost, webshareProxyPort),
-		url: proxyURL,
+	pool := NewProxyPool(logger, proxies)
+	startWebshareProxyRefresh(pool, apiKeys)
+	return pool, nil
+}
+
+func startWebshareProxyRefresh(pool *ProxyPool, apiKeys []string) {
+	if pool == nil || len(apiKeys) == 0 {
+		return
 	}
 
-	return NewProxyPool(logger, []*proxyState{state}), nil
+	keys := append([]string(nil), apiKeys...)
+	go func() {
+		ticker := time.NewTicker(webshareRefreshEvery)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			proxies, err := fetchWebshareProxyStates(webshareAPIHTTPClient, keys)
+			if err != nil {
+				pool.logger.Printf("Webshare proxy refresh failed")
+				continue
+			}
+
+			pool.Replace(proxies)
+			pool.logger.Printf("Webshare proxy refreshed: %d proxies", pool.Count())
+		}
+	}()
+}
+
+func fetchWebshareProxyStates(client *http.Client, apiKeys []string) ([]*proxyState, error) {
+	proxies := make([]*proxyState, 0)
+	for _, apiKey := range apiKeys {
+		states, err := fetchWebshareFreeDirectProxyStates(client, apiKey, len(proxies))
+		if err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, states...)
+	}
+	if len(proxies) == 0 {
+		return nil, errors.New("Webshare free direct proxy list is empty")
+	}
+
+	return proxies, nil
+}
+
+func parseWebshareAPIKeys(apiKeyValue string) ([]string, error) {
+	apiKeyValue = strings.TrimSpace(apiKeyValue)
+	if apiKeyValue == "" {
+		return nil, fmt.Errorf("%s must be set", webshareAPIKeyEnv)
+	}
+
+	parts := strings.Split(apiKeyValue, ",")
+	apiKeys := parts[:0]
+	for _, apiKey := range parts {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey != "" {
+			apiKeys = append(apiKeys, apiKey)
+		}
+	}
+	if len(apiKeys) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one API key", webshareAPIKeyEnv)
+	}
+
+	return apiKeys, nil
+}
+
+type websharePlan struct {
+	ID        int    `json:"id"`
+	Status    string `json:"status"`
+	ProxyType string `json:"proxy_type"`
+}
+
+type websharePlanListResponse struct {
+	Results []websharePlan `json:"results"`
+}
+
+type webshareProxy struct {
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	ProxyAddress string `json:"proxy_address"`
+	Port         int    `json:"port"`
+}
+
+type webshareProxyListResponse struct {
+	Next    string          `json:"next"`
+	Results []webshareProxy `json:"results"`
+}
+
+func fetchWebshareFreeDirectProxyStates(client *http.Client, apiKey string, keyOffset int) ([]*proxyState, error) {
+	plans, err := fetchWebshareFreePlans(client, apiKey)
+	if err != nil {
+		return nil, err
+	}
+
+	proxies := make([]*proxyState, 0)
+	for _, plan := range plans {
+		states, err := fetchWebshareDirectProxyStates(client, apiKey, plan.ID, keyOffset+len(proxies))
+		if err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, states...)
+	}
+
+	return proxies, nil
+}
+
+func fetchWebshareFreePlans(client *http.Client, apiKey string) ([]websharePlan, error) {
+	var response websharePlanListResponse
+	if err := webshareGetJSON(client, websharePlansURL+"?page_size=100", apiKey, &response); err != nil {
+		return nil, fmt.Errorf("fetch Webshare plans: %w", err)
+	}
+
+	plans := make([]websharePlan, 0, len(response.Results))
+	for _, plan := range response.Results {
+		if strings.EqualFold(plan.Status, "active") && strings.EqualFold(plan.ProxyType, "free") {
+			plans = append(plans, plan)
+		}
+	}
+
+	return plans, nil
+}
+
+func fetchWebshareDirectProxyStates(client *http.Client, apiKey string, planID, keyOffset int) ([]*proxyState, error) {
+	proxyListURL, err := url.Parse(webshareProxyListURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse Webshare proxy list URL: %w", err)
+	}
+
+	query := proxyListURL.Query()
+	query.Set("mode", "direct")
+	query.Set("page", "1")
+	query.Set("page_size", "100")
+	query.Set("plan_id", fmt.Sprint(planID))
+	proxyListURL.RawQuery = query.Encode()
+
+	proxies := make([]*proxyState, 0)
+	nextURL := proxyListURL.String()
+	for nextURL != "" {
+		var response webshareProxyListResponse
+		if err := webshareGetJSON(client, nextURL, apiKey, &response); err != nil {
+			return nil, fmt.Errorf("fetch Webshare direct proxies: %w", err)
+		}
+
+		states, err := webshareProxyStatesFromAPI(response.Results, keyOffset+len(proxies))
+		if err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, states...)
+		nextURL = response.Next
+	}
+
+	return proxies, nil
+}
+
+func webshareGetJSON(client *http.Client, rawURL, apiKey string, out any) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Token "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		io.Copy(io.Discard, resp.Body)
+		return fmt.Errorf("Webshare API returned status %d", resp.StatusCode)
+	}
+
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func webshareProxyStatesFromAPI(apiProxies []webshareProxy, keyOffset int) ([]*proxyState, error) {
+	proxies := make([]*proxyState, 0, len(apiProxies))
+	for _, apiProxy := range apiProxies {
+		host := strings.TrimSpace(apiProxy.ProxyAddress)
+		if host == "" {
+			return nil, errors.New("invalid Webshare proxy API response")
+		}
+
+		port := apiProxy.Port
+		if port == 0 {
+			return nil, errors.New("invalid Webshare proxy API response")
+		}
+
+		username := strings.TrimSpace(apiProxy.Username)
+		password := strings.TrimSpace(apiProxy.Password)
+		if username == "" || password == "" {
+			return nil, errors.New("invalid Webshare proxy API response")
+		}
+
+		hostPort := net.JoinHostPort(host, fmt.Sprint(port))
+		proxyURL := &url.URL{
+			Scheme: "socks5",
+			User:   url.UserPassword(username, password),
+			Host:   hostPort,
+		}
+		keyID := apiProxy.ID
+		if keyID == "" {
+			keyID = fmt.Sprint(keyOffset + len(proxies) + 1)
+		}
+		proxies = append(proxies, &proxyState{
+			key: fmt.Sprintf("socks5://%s#%s", hostPort, keyID),
+			url: proxyURL,
+		})
+	}
+
+	return proxies, nil
 }
 
 func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidate {
@@ -94,11 +305,7 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	start := p.next
 	p.next = (p.next + 1) % len(p.proxies)
 
-	hostVerified := make([]proxyCandidate, 0, len(p.proxies))
-	verified := make([]proxyCandidate, 0, len(p.proxies))
-	probed := make([]proxyCandidate, 0, len(p.proxies))
-	untested := make([]proxyCandidate, 0, len(p.proxies))
-	retry := make([]proxyCandidate, 0, len(p.proxies))
+	ready := make([]proxyCandidate, 0, len(p.proxies))
 	cooling := make([]proxyCandidate, 0, len(p.proxies))
 
 	for i := 0; i < len(p.proxies); i++ {
@@ -110,27 +317,12 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			continue
 		}
 
-		switch {
-		case hasVerifiedHost(state, targetHost):
-			hostVerified = append(hostVerified, candidate)
-		case !state.verifiedAt.IsZero():
-			verified = append(verified, candidate)
-		case state.healthy:
-			probed = append(probed, candidate)
-		case state.lastChecked.IsZero():
-			untested = append(untested, candidate)
-		default:
-			retry = append(retry, candidate)
-		}
+		ready = append(ready, candidate)
 	}
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
-	ordered = appendCandidatesByProtocolPriority(ordered, hostVerified)
-	ordered = appendCandidatesByProtocolPriority(ordered, verified)
-	ordered = appendCandidatesByProtocolPriority(ordered, probed)
-	ordered = appendCandidatesByProtocolPriority(ordered, untested)
-	ordered = appendCandidatesByProtocolPriority(ordered, retry)
-	ordered = appendCandidatesByProtocolPriority(ordered, cooling)
+	ordered = append(ordered, ready...)
+	ordered = append(ordered, cooling...)
 	return ordered
 }
 
@@ -189,6 +381,18 @@ func (p *ProxyPool) Count() int {
 	return len(p.proxies)
 }
 
+func (p *ProxyPool) Replace(proxies []*proxyState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.proxies = cloneProxyStates(proxies)
+	if len(p.proxies) == 0 {
+		p.next = 0
+		return
+	}
+	p.next %= len(p.proxies)
+}
+
 func hasVerifiedHost(state *proxyState, targetHost string) bool {
 	if state == nil || targetHost == "" || len(state.verifiedHosts) == 0 {
 		return false
@@ -245,12 +449,12 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
 			if !shouldRetryError(req.Context(), err) {
-				logger.Printf("proxy_error web=%s error=%v", targetHost, err)
+				logger.Printf("[ERR] %s -> %s (%v)", targetHost, proxyLogAddress(candidate.url), err)
 				return nil, err
 			}
 
 			t.pool.MarkFailure(candidate.key)
-			logger.Printf("proxy_error web=%s error=%v", targetHost, err)
+			logger.Printf("[ERR] %s -> %s (%v)", targetHost, proxyLogAddress(candidate.url), err)
 			lastErr = err
 			continue
 		}
@@ -259,13 +463,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			t.pool.MarkFailure(candidate.key)
-			logger.Printf("target_status web=%s status=%d", targetHost, resp.StatusCode)
+			logger.Printf("[RETRY] %s -> %s (%d)", targetHost, proxyLogAddress(candidate.url), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("connected web=%s ip=%s", targetHost, candidate.key)
+		logger.Printf("[OK] %s -> %s (%d)", targetHost, proxyLogAddress(candidate.url), resp.StatusCode)
 		return resp, nil
 	}
 
@@ -274,6 +478,19 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	return nil, lastErr
+}
+
+func proxyLogAddress(proxyURL *url.URL) string {
+	if proxyURL == nil {
+		return "-"
+	}
+
+	host := proxyURL.Hostname()
+	if host == "" {
+		return proxyURL.Host
+	}
+
+	return host
 }
 
 func (t *RotatingProxyTransport) transportLogger() *log.Logger {

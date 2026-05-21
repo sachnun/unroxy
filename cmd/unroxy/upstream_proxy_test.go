@@ -34,21 +34,19 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 	}
 }
 
-func TestProxyPoolCandidatesPreferHealthyThenUntestedThenRetryThenCooling(t *testing.T) {
+func TestProxyPoolCandidatesRoundRobinReadyThenCooling(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
-			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-30 * time.Second)},
-			{key: "http://probed:80", url: mustParseURL(t, "http://probed:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
-			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
-			{key: "http://retry:80", url: mustParseURL(t, "http://retry:80"), lastChecked: now.Add(-time.Minute)},
 			{key: "http://cooling:80", url: mustParseURL(t, "http://cooling:80"), unavailableUntil: now.Add(time.Minute)},
+			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-30 * time.Second)},
+			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
 		},
 	}
 
 	candidates := pool.Candidates(now, "")
-	got := []string{candidates[0].key, candidates[1].key, candidates[2].key, candidates[3].key, candidates[4].key}
-	want := []string{"http://verified:80", "http://probed:80", "http://untested:80", "http://retry:80", "http://cooling:80"}
+	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
+	want := []string{"http://verified:80", "http://untested:80", "http://cooling:80"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("candidate order = %v, want %v", got, want)
@@ -56,7 +54,7 @@ func TestProxyPoolCandidatesPreferHealthyThenUntestedThenRetryThenCooling(t *tes
 	}
 }
 
-func TestProxyPoolCandidatesPreferProtocolPriorityWithinTier(t *testing.T) {
+func TestProxyPoolCandidatesPreserveRoundRobinOverProtocolPriority(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
@@ -68,7 +66,7 @@ func TestProxyPoolCandidatesPreferProtocolPriorityWithinTier(t *testing.T) {
 
 	candidates := pool.Candidates(now, "")
 	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
-	want := []string{"socks5://socks:1080", "https://https:443", "http://http:80"}
+	want := []string{"http://http:80", "https://https:443", "socks5://socks:1080"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("candidate order = %v, want %v", got, want)
@@ -127,7 +125,7 @@ func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	}
 }
 
-func TestProxyPoolCandidatesPreferVerifiedHostFirst(t *testing.T) {
+func TestProxyPoolCandidatesRotateEvenForVerifiedHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
@@ -139,11 +137,34 @@ func TestProxyPoolCandidatesPreferVerifiedHostFirst(t *testing.T) {
 
 	candidates := pool.Candidates(now, "opencode.ai")
 	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
-	want := []string{"http://host:80", "http://global:80", "http://probed:80"}
+	want := []string{"http://global:80", "http://host:80", "http://probed:80"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("candidate order = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestProxyPoolReplaceSwapsProxiesAndPreservesRotationBounds(t *testing.T) {
+	now := time.Now()
+	pool := &ProxyPool{
+		next: 5,
+		proxies: []*proxyState{
+			{key: "http://old:80", url: mustParseURL(t, "http://old:80")},
+		},
+	}
+
+	pool.Replace([]*proxyState{
+		{key: "http://new1:80", url: mustParseURL(t, "http://new1:80")},
+		{key: "http://new2:80", url: mustParseURL(t, "http://new2:80")},
+	})
+
+	candidates := pool.Candidates(now, "")
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	}
+	if candidates[0].key != "http://new2:80" || candidates[1].key != "http://new1:80" {
+		t.Fatalf("unexpected candidate order after replace: %q, %q", candidates[0].key, candidates[1].key)
 	}
 }
 
@@ -225,13 +246,13 @@ func TestRotatingProxyTransportRetriesProxyCandidates(t *testing.T) {
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "proxy_error web=example.com error=dial failed") {
+	if !strings.Contains(output, "[ERR] example.com -> bad (dial failed)") {
 		t.Fatalf("expected failure log for bad proxy, got %q", output)
 	}
-	if !strings.Contains(output, "target_status web=example.com status=403") {
+	if !strings.Contains(output, "[RETRY] example.com -> blocked (403)") {
 		t.Fatalf("expected retry status log for blocked proxy, got %q", output)
 	}
-	if !strings.Contains(output, "connected web=example.com ip=http://good:80") {
+	if !strings.Contains(output, "[OK] example.com -> good (200)") {
 		t.Fatalf("expected success log for good proxy, got %q", output)
 	}
 }

@@ -6,24 +6,14 @@ Proxy server with URL rewriting.
 
 ```bash
 docker run \
+  -e API_KEY=xxx,zzz \
   -p 8080:8080 \
   ghcr.io/sachnun/unroxy
 
 curl http://localhost:8080/example.com
 ```
 
-Requests to the target origin always use Webshare rotating SOCKS5 through `p.webshare.io:80`.
-
-Set Webshare credentials with:
-
-```bash
-export WEBSHARE_USERNAME=your_username
-export WEBSHARE_PASSWORD=your_password
-```
-
-Proxy priority is:
-
-1. `socks5`
+Requests to the target origin always use rotating SOCKS5 direct proxies from Webshare free plans. The proxy list refreshes every 6 hours.
 
 ## Development
 

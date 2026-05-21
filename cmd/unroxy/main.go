@@ -28,13 +28,13 @@ func newUpstreamTransport(logger *log.Logger) http.RoundTripper {
 		logger = log.Default()
 	}
 
-	pool, err := NewWebshareProxyPool(logger, os.Getenv(webshareUsernameEnv), os.Getenv(websharePasswordEnv))
+	pool, err := NewWebshareProxyPool(logger, os.Getenv(webshareAPIKeyEnv))
 	if err != nil {
 		logger.Printf("Webshare proxy not ready")
 		pool = NewProxyPool(logger, nil)
 	}
 
-	logger.Printf("Proxy ready: %s:%s", webshareProxyHost, webshareProxyPort)
+	logger.Printf("Proxy ready: %d Webshare proxies", pool.Count())
 
 	return NewRotatingProxyTransport(pool)
 }
