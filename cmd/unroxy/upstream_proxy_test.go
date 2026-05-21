@@ -90,6 +90,40 @@ func TestParseProxyStatesAllIncludesSupportedUsableProtocols(t *testing.T) {
 	}
 }
 
+func TestParseProxyStatesGeonodeFormat(t *testing.T) {
+	body := []byte(`{
+		"data":[
+			{"ip":"1.1.1.1","port":"1080","protocols":["socks5","socks4"]},
+			{"ip":"2.2.2.2","port":"8080","protocols":["http"]},
+			{"ip":"3.3.3.3","port":"8443","protocols":["https"]},
+			{"ip":"1.1.1.1","port":"1080","protocols":["socks5"]}
+		]
+	}`)
+
+	states, err := parseProxyStates(body, allowedProxyProtocols("socks5", "https", "http"))
+	if err != nil {
+		t.Fatalf("parseProxyStates returned error: %v", err)
+	}
+
+	if len(states) != 3 {
+		t.Fatalf("expected 3 states, got %d", len(states))
+	}
+
+	keys := []string{states[0].key, states[1].key, states[2].key}
+	if !containsString(keys, "socks5://1.1.1.1:1080") {
+		t.Fatalf("expected socks5 proxy from Geonode data, got %v", keys)
+	}
+	if !containsString(keys, "http://2.2.2.2:8080") {
+		t.Fatalf("expected http proxy from Geonode data, got %v", keys)
+	}
+	if !containsString(keys, "https://3.3.3.3:8443") {
+		t.Fatalf("expected https proxy from Geonode data, got %v", keys)
+	}
+	if containsString(keys, "socks4://1.1.1.1:1080") {
+		t.Fatalf("expected socks4 proxy to be excluded, got %v", keys)
+	}
+}
+
 func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
@@ -155,7 +189,7 @@ func TestProxyPoolCandidatesPreferProtocolPriorityWithinTier(t *testing.T) {
 	}
 }
 
-func TestRotatingProxyTransportUsesDirectResponseWhenNotRestricted(t *testing.T) {
+func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	pool := &ProxyPool{
 		failureCooldown: time.Minute,
 		lastRefresh:     time.Now(),
@@ -170,15 +204,15 @@ func TestRotatingProxyTransportUsesDirectResponseWhenNotRestricted(t *testing.T)
 		pool: pool,
 		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
-			if proxyURL != nil {
-				proxyCalls++
-				return nil, errors.New("proxy should not be called")
+			if proxyURL == nil {
+				directCalls++
+				return nil, errors.New("direct should not be called")
 			}
 
-			directCalls++
+			proxyCalls++
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("direct")),
+				Body:       io.NopCloser(strings.NewReader("proxy")),
 				Header:     make(http.Header),
 				Request:    req,
 			}, nil
@@ -199,11 +233,11 @@ func TestRotatingProxyTransportUsesDirectResponseWhenNotRestricted(t *testing.T)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 response, got %d", resp.StatusCode)
 	}
-	if directCalls != 1 {
-		t.Fatalf("expected 1 direct call, got %d", directCalls)
+	if directCalls != 0 {
+		t.Fatalf("expected 0 direct calls, got %d", directCalls)
 	}
-	if proxyCalls != 0 {
-		t.Fatalf("expected 0 proxy calls, got %d", proxyCalls)
+	if proxyCalls != 1 {
+		t.Fatalf("expected 1 proxy call, got %d", proxyCalls)
 	}
 }
 
@@ -227,7 +261,7 @@ func TestProxyPoolCandidatesPreferVerifiedHostFirst(t *testing.T) {
 	}
 }
 
-func TestRotatingProxyTransportFallsBackToProxyAfterDirectRestriction(t *testing.T) {
+func TestRotatingProxyTransportRetriesProxyCandidates(t *testing.T) {
 	var logs strings.Builder
 	pool := &ProxyPool{
 		logger:          log.New(&logs, "", 0),
@@ -247,12 +281,7 @@ func TestRotatingProxyTransportFallsBackToProxyAfterDirectRestriction(t *testing
 			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
 			if proxyURL == nil {
 				directCalls++
-				return &http.Response{
-					StatusCode: http.StatusTooManyRequests,
-					Body:       io.NopCloser(strings.NewReader("rate limited")),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
+				return nil, errors.New("direct should not be called")
 			}
 
 			switch proxyURL.Host {
@@ -300,8 +329,8 @@ func TestRotatingProxyTransportFallsBackToProxyAfterDirectRestriction(t *testing
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 response, got %d", resp.StatusCode)
 	}
-	if directCalls != 1 {
-		t.Fatalf("expected 1 direct call, got %d", directCalls)
+	if directCalls != 0 {
+		t.Fatalf("expected 0 direct calls, got %d", directCalls)
 	}
 	if !pool.proxies[2].unavailableUntil.IsZero() {
 		t.Fatalf("expected successful proxy cooldown to be cleared")
@@ -311,9 +340,6 @@ func TestRotatingProxyTransportFallsBackToProxyAfterDirectRestriction(t *testing
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "direct retry status target=https://example.com/path status=429") {
-		t.Fatalf("expected direct retry log, got %q", output)
-	}
 	if !strings.Contains(output, "proxy attempt target=https://example.com/path via=socks5://bad:1080") {
 		t.Fatalf("expected attempt log for bad proxy, got %q", output)
 	}
@@ -328,10 +354,11 @@ func TestRotatingProxyTransportFallsBackToProxyAfterDirectRestriction(t *testing
 	}
 }
 
-func TestRotatingProxyTransportReturnsDirectResponseWhenProxyFallbackFails(t *testing.T) {
+func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 	transport := &RotatingProxyTransport{
 		pool: &ProxyPool{
-			lastRefresh: time.Now(),
+			failureCooldown: time.Minute,
+			lastRefresh:     time.Now(),
 			proxies: []*proxyState{
 				{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
 			},
@@ -342,12 +369,7 @@ func TestRotatingProxyTransportReturnsDirectResponseWhenProxyFallbackFails(t *te
 				return nil, errors.New("proxy failed")
 			}
 
-			return &http.Response{
-				StatusCode: http.StatusForbidden,
-				Body:       io.NopCloser(strings.NewReader("direct forbidden")),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
+			return nil, errors.New("direct should not be called")
 		}),
 	}
 
@@ -356,25 +378,16 @@ func TestRotatingProxyTransportReturnsDirectResponseWhenProxyFallbackFails(t *te
 		t.Fatalf("http.NewRequest returned error: %v", err)
 	}
 
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip returned error: %v", err)
+	_, err = transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected RoundTrip error")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 response, got %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("io.ReadAll returned error: %v", err)
-	}
-	if string(body) != "direct forbidden" {
-		t.Fatalf("expected direct fallback body, got %q", string(body))
+	if !strings.Contains(err.Error(), "proxy failed") {
+		t.Fatalf("expected proxy failure error, got %v", err)
 	}
 }
 
-func TestRotatingProxyTransportReusesRestrictedHostCache(t *testing.T) {
+func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	pool := &ProxyPool{
 		failureCooldown: time.Minute,
 		lastRefresh:     time.Now(),
@@ -386,18 +399,12 @@ func TestRotatingProxyTransportReusesRestrictedHostCache(t *testing.T) {
 	directCalls := 0
 	proxyCalls := 0
 	transport := &RotatingProxyTransport{
-		pool:              pool,
-		restrictedHostTTL: time.Minute,
+		pool: pool,
 		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
 			if proxyURL == nil {
 				directCalls++
-				return &http.Response{
-					StatusCode: http.StatusForbidden,
-					Body:       io.NopCloser(strings.NewReader("direct forbidden")),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
+				return nil, errors.New("direct should not be called")
 			}
 
 			proxyCalls++
@@ -430,8 +437,8 @@ func TestRotatingProxyTransportReusesRestrictedHostCache(t *testing.T) {
 	}
 	defer resp2.Body.Close()
 
-	if directCalls != 1 {
-		t.Fatalf("expected restricted host cache to skip second direct call, got %d direct calls", directCalls)
+	if directCalls != 0 {
+		t.Fatalf("expected 0 direct calls, got %d", directCalls)
 	}
 	if proxyCalls != 2 {
 		t.Fatalf("expected 2 proxy calls, got %d", proxyCalls)
@@ -502,7 +509,7 @@ func TestProxyPoolEnsureFreshKeepsStaleCacheOnRefreshFailure(t *testing.T) {
 	pool.mu.RUnlock()
 
 	if err := pool.EnsureFresh(context.Background(), lastRefresh.Add(upstreamProxyListTTL+time.Second)); err != nil {
-		t.Fatalf("expected stale cache fallback, got error: %v", err)
+		t.Fatalf("expected stale cache reuse, got error: %v", err)
 	}
 	if pool.Count() != 1 {
 		t.Fatalf("expected cached proxies to remain available, got %d", pool.Count())

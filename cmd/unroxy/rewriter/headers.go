@@ -100,24 +100,20 @@ func rewriteCookiePath(cookie, domain, proxyBase string) string {
 }
 
 // RewriteRequestHeaders modifies request headers for proxying
-func RewriteRequestHeaders(req *http.Request, domain, randomIP, userAgent string) {
+func RewriteRequestHeaders(req *http.Request, domain string) {
 	req.Host = domain
-
-	// Set IP spoofing headers (avoid CF-specific headers)
-	req.Header.Set("X-Forwarded-For", randomIP)
-	req.Header.Set("X-Real-IP", randomIP)
-	req.Header.Set("X-Originating-IP", randomIP)
-	req.Header.Set("True-Client-IP", randomIP)
-	req.Header.Set("Client-IP", randomIP)
-
-	// Set user agent
-	req.Header.Set("User-Agent", userAgent)
 
 	// Disable compression to avoid dealing with gzip/brotli decompression
 	req.Header.Set("Accept-Encoding", "identity")
 
-	// Remove headers that might reveal proxy or cause Cloudflare issues
+	// Remove forwarded client IP headers.
+	req.Header["X-Forwarded-For"] = nil
+	req.Header.Del("X-Real-IP")
+	req.Header.Del("X-Originating-IP")
+	req.Header.Del("True-Client-IP")
+	req.Header.Del("Client-IP")
+	req.Header.Del("Forwarded")
 	req.Header.Del("X-Forwarded-Host")
 	req.Header.Del("X-Forwarded-Proto")
-	req.Header.Del("CF-Connecting-IP") // Cloudflare treats spoofed CF headers as abuse
+	req.Header.Del("CF-Connecting-IP")
 }

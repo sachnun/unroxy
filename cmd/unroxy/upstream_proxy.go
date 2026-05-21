@@ -19,14 +19,13 @@ import (
 
 const (
 	upstreamProxyListTTL = 10 * time.Minute
-	restrictedHostTTL    = 10 * time.Minute
 	proxyFailureCooldown = time.Minute
 	proxyFetchTimeout    = 30 * time.Second
 	proxyDialTimeout     = 5 * time.Second
 	proxyHeaderTimeout   = 20 * time.Second
 )
 
-var upstreamProxyListURL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json"
+var upstreamProxyListURL = "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc"
 
 var errNoUpstreamProxy = errors.New("no upstream proxies available")
 
@@ -34,6 +33,16 @@ type upstreamProxyEntry struct {
 	Proxy    string `json:"proxy"`
 	Protocol string `json:"protocol"`
 	HTTPS    bool   `json:"https"`
+}
+
+type geonodeProxyListResponse struct {
+	Data []geonodeProxyEntry `json:"data"`
+}
+
+type geonodeProxyEntry struct {
+	IP        string   `json:"ip"`
+	Port      string   `json:"port"`
+	Protocols []string `json:"protocols"`
 }
 
 type proxyState struct {
@@ -323,13 +332,9 @@ func hasVerifiedHost(state *proxyState, targetHost string) bool {
 }
 
 type RotatingProxyTransport struct {
-	logger            *log.Logger
-	pool              *ProxyPool
-	transport         http.RoundTripper
-	restrictedHostTTL time.Duration
-
-	mu              sync.Mutex
-	restrictedHosts map[string]time.Time
+	logger    *log.Logger
+	pool      *ProxyPool
+	transport http.RoundTripper
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -339,10 +344,9 @@ func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
 	}
 
 	return &RotatingProxyTransport{
-		logger:            logger,
-		pool:              pool,
-		transport:         newProxyAwareTransport(),
-		restrictedHostTTL: restrictedHostTTL,
+		logger:    logger,
+		pool:      pool,
+		transport: newProxyAwareTransport(),
 	}
 }
 
@@ -353,57 +357,7 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 	}
 
 	targetHost := requestTargetHost(req)
-	logger := t.transportLogger()
-	if t.isRestrictedHost(targetHost, time.Now()) {
-		logger.Printf("proxy fallback target=%s reason=host-restricted", req.URL.String())
-		resp, err := t.roundTripViaProxy(req, body, hasBody, targetHost)
-		if err == nil {
-			return resp, nil
-		}
-		if req.Context().Err() != nil {
-			return nil, err
-		}
-
-		resp, err = t.roundTripDirect(req, body, hasBody)
-		if err != nil {
-			return nil, err
-		}
-		if shouldRetryStatus(resp.StatusCode) {
-			logger.Printf("direct retry status target=%s status=%d", req.URL.String(), resp.StatusCode)
-			t.markRestrictedHost(targetHost, time.Now())
-		} else {
-			t.clearRestrictedHost(targetHost)
-		}
-
-		return resp, nil
-	}
-
-	directResp, err := t.roundTripDirect(req, body, hasBody)
-	if err != nil {
-		logger.Printf("direct failed target=%s err=%v", req.URL.String(), err)
-		return nil, err
-	}
-	if !shouldRetryStatus(directResp.StatusCode) {
-		t.clearRestrictedHost(targetHost)
-		return directResp, nil
-	}
-
-	logger.Printf("direct retry status target=%s status=%d", req.URL.String(), directResp.StatusCode)
-	t.markRestrictedHost(targetHost, time.Now())
-
-	proxyResp, err := t.roundTripViaProxy(req, body, hasBody, targetHost)
-	if err == nil {
-		io.Copy(io.Discard, directResp.Body)
-		directResp.Body.Close()
-		return proxyResp, nil
-	}
-
-	return directResp, nil
-}
-
-func (t *RotatingProxyTransport) roundTripDirect(req *http.Request, body []byte, hasBody bool) (*http.Response, error) {
-	attemptReq := cloneRequestForProxy(req, nil, body, hasBody)
-	return t.transport.RoundTrip(attemptReq)
+	return t.roundTripViaProxy(req, body, hasBody, targetHost)
 }
 
 func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byte, hasBody bool, targetHost string) (*http.Response, error) {
@@ -470,62 +424,6 @@ func (t *RotatingProxyTransport) transportLogger() *log.Logger {
 	}
 
 	return logger
-}
-
-func (t *RotatingProxyTransport) isRestrictedHost(targetHost string, now time.Time) bool {
-	if targetHost == "" {
-		return false
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	until, ok := t.restrictedHosts[targetHost]
-	if !ok {
-		return false
-	}
-	if now.Before(until) {
-		return true
-	}
-
-	delete(t.restrictedHosts, targetHost)
-	return false
-}
-
-func (t *RotatingProxyTransport) markRestrictedHost(targetHost string, now time.Time) {
-	if targetHost == "" {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.restrictedHosts == nil {
-		t.restrictedHosts = make(map[string]time.Time)
-	}
-	t.restrictedHosts[targetHost] = now.Add(t.restrictedTTL())
-}
-
-func (t *RotatingProxyTransport) clearRestrictedHost(targetHost string) {
-	if targetHost == "" {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.restrictedHosts == nil {
-		return
-	}
-	delete(t.restrictedHosts, targetHost)
-}
-
-func (t *RotatingProxyTransport) restrictedTTL() time.Duration {
-	if t.restrictedHostTTL > 0 {
-		return t.restrictedHostTTL
-	}
-
-	return restrictedHostTTL
 }
 
 func requestTargetHost(req *http.Request) string {
@@ -669,6 +567,10 @@ func shouldRetryError(ctx context.Context, err error) bool {
 }
 
 func parseProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*proxyState, error) {
+	if states, ok, err := parseGeonodeProxyStates(body, allowedProtocols); ok || err != nil {
+		return states, err
+	}
+
 	var entries []upstreamProxyEntry
 	if err := json.Unmarshal(body, &entries); err != nil {
 		return nil, err
@@ -699,6 +601,60 @@ func parseProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*pro
 	}
 
 	return states, nil
+}
+
+func parseGeonodeProxyStates(body []byte, allowedProtocols map[string]struct{}) ([]*proxyState, bool, error) {
+	var list geonodeProxyListResponse
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, false, nil
+	}
+	if list.Data == nil {
+		return nil, false, nil
+	}
+
+	states := make([]*proxyState, 0, len(list.Data))
+	seen := make(map[string]struct{}, len(list.Data))
+	for _, entry := range list.Data {
+		host := net.JoinHostPort(strings.TrimSpace(entry.IP), strings.TrimSpace(entry.Port))
+		if strings.TrimSpace(entry.IP) == "" || strings.TrimSpace(entry.Port) == "" {
+			continue
+		}
+
+		for _, protocol := range entry.Protocols {
+			protocol = normalizeProxyProtocol(protocol)
+			if !isAllowedGeonodeProtocol(protocol, allowedProtocols) {
+				continue
+			}
+
+			parsed := &url.URL{Scheme: protocol, Host: host}
+			key := parsed.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+
+			seen[key] = struct{}{}
+			states = append(states, &proxyState{key: key, url: parsed})
+		}
+	}
+
+	return states, true, nil
+}
+
+func normalizeProxyProtocol(protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "socks5h" {
+		return "socks5"
+	}
+	return protocol
+}
+
+func isAllowedGeonodeProtocol(protocol string, allowedProtocols map[string]struct{}) bool {
+	if len(allowedProtocols) == 0 || !supportsProxyScheme(protocol) {
+		return false
+	}
+
+	_, ok := allowedProtocols[protocol]
+	return ok
 }
 
 func isAllowedProxyEntry(entry upstreamProxyEntry, allowedProtocols map[string]struct{}) bool {

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"unroxy/cmd/unroxy/rewriter"
-	"unroxy/cmd/unroxy/utils"
 )
 
 // ProxyHandler handles all proxy requests
@@ -86,9 +85,6 @@ func (h *ProxyHandler) parseRequest(r *http.Request) (domain, path, query string
 
 // createProxy creates a configured reverse proxy
 func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.ReverseProxy {
-	randomIP := utils.GenerateRandomIP()
-	userAgent := utils.RandomUserAgent()
-
 	return &httputil.ReverseProxy{
 		Transport: h.transport,
 		Director: func(req *http.Request) {
@@ -97,7 +93,7 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 			req.URL.Path = path
 			req.URL.RawQuery = query
 
-			rewriter.RewriteRequestHeaders(req, domain, randomIP, userAgent)
+			rewriter.RewriteRequestHeaders(req, domain)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			// Rewrite response headers (Location, Set-Cookie, etc.)

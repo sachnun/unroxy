@@ -12,11 +12,9 @@ docker run \
 curl http://localhost:8080/example.com
 ```
 
-Requests go direct to the target origin by default.
+Requests to the target origin always use upstream proxies loaded from Geonode.
 
-If the target host responds with `403` or `429`, Unroxy marks that host as restricted for a short time and retries through upstream proxies.
-
-Fallback proxy priority is:
+Proxy priority is:
 
 1. `socks5`
 2. `https`

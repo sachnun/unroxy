@@ -120,16 +120,23 @@ func TestRewriteHeaders_AddsCORS(t *testing.T) {
 func TestRewriteRequestHeaders(t *testing.T) {
 	req, _ := http.NewRequest("GET", "http://proxy.local/example.com/path", nil)
 
-	RewriteRequestHeaders(req, "example.com", "1.2.3.4", "TestAgent/1.0")
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	req.Header.Set("User-Agent", "TestAgent/1.0")
+
+	RewriteRequestHeaders(req, "example.com")
 
 	if req.Host != "example.com" {
 		t.Errorf("Expected Host to be example.com, got %s", req.Host)
 	}
-	if req.Header.Get("X-Forwarded-For") != "1.2.3.4" {
-		t.Error("X-Forwarded-For should be set")
+	if _, ok := req.Header["X-Forwarded-For"]; !ok || req.Header.Get("X-Forwarded-For") != "" {
+		t.Error("X-Forwarded-For should be suppressed")
+	}
+	if req.Header.Get("X-Real-IP") != "" {
+		t.Error("X-Real-IP should be removed")
 	}
 	if req.Header.Get("User-Agent") != "TestAgent/1.0" {
-		t.Error("User-Agent should be set")
+		t.Error("User-Agent should be preserved")
 	}
 }
 

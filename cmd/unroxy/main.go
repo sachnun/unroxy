@@ -38,12 +38,12 @@ func newUpstreamTransport(logger *log.Logger) http.RoundTripper {
 	allowedProtocols := allowedProxyProtocols("socks5", "https", "http")
 	pool := NewProxyPool(logger, allowedProtocols)
 	if err := pool.Refresh(context.Background()); err != nil {
-		logger.Printf("Initial proxy list refresh failed, fallback proxy list unavailable: %v", err)
+		logger.Printf("Initial proxy list refresh failed, proxy list unavailable: %v", err)
 	} else {
-		logger.Printf("Loaded %d fallback upstream proxies", pool.Count())
+		logger.Printf("Loaded %d upstream proxies", pool.Count())
 	}
 
-	logger.Printf("Upstream proxy fallback enabled with priority: socks5,https,http")
+	logger.Printf("Upstream proxy mode enabled with priority: socks5,https,http")
 
 	return NewRotatingProxyTransport(pool)
 }
