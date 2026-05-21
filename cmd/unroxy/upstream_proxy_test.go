@@ -418,6 +418,20 @@ func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	}
 }
 
+func TestNewProxyAwareTransportDisablesConnectionReuse(t *testing.T) {
+	transport, ok := newProxyAwareTransport().(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport")
+	}
+
+	if !transport.DisableKeepAlives {
+		t.Fatalf("expected DisableKeepAlives to prevent proxy rotation bypass")
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Fatalf("expected ForceAttemptHTTP2 disabled with per-request proxy rotation")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

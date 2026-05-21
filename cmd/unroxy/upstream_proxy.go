@@ -568,7 +568,8 @@ func newProxyAwareTransport() http.RoundTripper {
 			return proxyURL, nil
 		},
 		DialContext:           dialer.DialContext,
-		ForceAttemptHTTP2:     true,
+		DisableKeepAlives:     true,
+		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
 		IdleConnTimeout:       90 * time.Second,
