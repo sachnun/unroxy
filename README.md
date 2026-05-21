@@ -13,7 +13,7 @@ docker run \
 curl http://localhost:8080/example.com
 ```
 
-Requests to the target origin always use rotating SOCKS5 direct proxies from Webshare free plans. The proxy list refreshes every 6 hours.
+Requests to the target origin always use rotating SOCKS5 direct proxies from [Webshare](https://dashboard.webshare.io/) free plans. The proxy list refreshes every 6 hours.
 
 ## Development
 
