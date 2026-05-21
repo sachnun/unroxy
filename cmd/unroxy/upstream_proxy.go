@@ -448,15 +448,9 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
-			if !shouldRetryError(req.Context(), err) {
-				logger.Printf("[ERR] %s -> %s (%v)", targetHost, proxyLogAddress(candidate.url), err)
-				return nil, err
-			}
-
 			t.pool.MarkFailure(candidate.key)
 			logger.Printf("[ERR] %s -> %s (%v)", targetHost, proxyLogAddress(candidate.url), err)
-			lastErr = err
-			continue
+			return nil, err
 		}
 
 		if shouldRetryStatus(resp.StatusCode) {
@@ -634,15 +628,7 @@ func proxySchemePriority(u *url.URL) int {
 }
 
 func shouldRetryStatus(statusCode int) bool {
-	return statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests
-}
-
-func shouldRetryError(ctx context.Context, err error) bool {
-	if ctx != nil && ctx.Err() != nil {
-		return false
-	}
-
-	return !errors.Is(err, context.Canceled)
+	return statusCode == http.StatusTooManyRequests
 }
 
 func cloneProxyStates(proxies []*proxyState) []*proxyState {

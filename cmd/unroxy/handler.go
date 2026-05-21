@@ -93,6 +93,10 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 			rewriter.RewriteRequestHeaders(req, domain)
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Set("Cache-Control", "no-store")
+			resp.Header.Set("Pragma", "no-cache")
+			resp.Header.Set("Expires", "0")
+
 			// Rewrite response headers (Location, Set-Cookie, etc.)
 			rewriter.RewriteHeaders(resp, domain, "")
 
