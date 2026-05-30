@@ -45,14 +45,9 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 	defaultPool := NewProxyPool(logger, allProxies)
 	defaultTransport := NewRotatingProxyTransport(defaultPool)
 
-	// Named pools per country (only if >= 2 proxies for rotation)
+	// Named pools per country
 	named := make([]*NamedPool, 0, len(countryPools))
 	for country, pool := range countryPools {
-		count := pool.Count()
-		if count < 2 {
-			logger.Printf("Pool %q skipped: only %d proxy (need >= 2 for rotation)", country, count)
-			continue
-		}
 		transport := NewRotatingProxyTransport(pool)
 		named = append(named, &NamedPool{
 			Name:      country,
@@ -60,7 +55,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 			Pool:      pool,
 			Transport: transport,
 		})
-		logger.Printf("Pool %q ready: %d proxies", country, count)
+		logger.Printf("Pool %q ready: %d proxies", country, pool.Count())
 	}
 
 	logger.Printf("Total: %d proxies across %d countries", len(allProxies), len(countryPools))

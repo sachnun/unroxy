@@ -27,7 +27,7 @@ func TestNewCountryPoolRouterUsesWebshareAPIKeys(t *testing.T) {
 			if r.URL.Query().Get("mode") != "direct" || r.URL.Query().Get("plan_id") != "7" {
 				t.Fatalf("unexpected proxy list query %q", r.URL.RawQuery)
 			}
-			io.WriteString(w, `{"next":null,"results":[{"id":"d-1","username":"user","password":"pass","proxy_address":"1.2.3.4","port":8080,"country_code":"US"},{"id":"d-2","username":"user2","password":"pass2","proxy_address":"5.6.7.8","port":9090,"country_code":"US"}]}`)
+			io.WriteString(w, `{"next":null,"results":[{"id":"d-1","username":"user","password":"pass","proxy_address":"1.2.3.4","port":8080,"country_code":"US"}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -54,7 +54,7 @@ func TestNewCountryPoolRouterUsesWebshareAPIKeys(t *testing.T) {
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "Pool \"US\" ready: 2 proxies") {
+	if !strings.Contains(output, "Pool \"US\" ready: 1 proxies") {
 		t.Fatalf("expected country pool log, got %q", output)
 	}
 	if strings.Contains(output, "api-key") || strings.Contains(output, "user") || strings.Contains(output, "pass") {
