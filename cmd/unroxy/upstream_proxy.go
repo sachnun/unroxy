@@ -31,8 +31,9 @@ const (
 )
 
 var (
-	proxiflyBaseURL    = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/"
-	errNoUpstreamProxy = errors.New("no upstream proxies available")
+	proxiflyBaseURL       = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/"
+	proxyscrapeBaseURL    = "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/"
+	errNoUpstreamProxy    = errors.New("no upstream proxies available")
 )
 
 type proxiflyProxy struct {
@@ -211,13 +212,119 @@ func groupProxiesByCountry(proxies []*proxyState) map[string][]*proxyState {
 	return groups
 }
 
-// NewProxiflyCountryPools fetches proxies from Proxifly, tests them, groups by country.
-func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*proxyState, error) {
-	proxies, err := fetchProxiflyProxies()
-	if err != nil {
-		return nil, nil, err
+// ── ProxyScrape ────────────────────────────────────────────────────────
+
+type proxyscrapeProxy struct {
+	Protocol    string `json:"protocol"`
+	IP          string `json:"ip"`
+	Port        int    `json:"port"`
+	CountryCode string `json:"country_code"`
+}
+
+func fetchProxyscrapeProxies() ([]*proxyState, error) {
+	client := &http.Client{Timeout: proxiflyFetchTimeout}
+	all := make([]*proxyState, 0)
+
+	for _, path := range []string{
+		"protocols/socks5/data.json",
+		"protocols/socks4/data.json",
+	} {
+		states, err := func() ([]*proxyState, error) {
+			resp, err := client.Get(proxyscrapeBaseURL + path)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				io.Copy(io.Discard, resp.Body)
+				return nil, fmt.Errorf("status %d", resp.StatusCode)
+			}
+			var proxies []proxyscrapeProxy
+			if err := json.NewDecoder(resp.Body).Decode(&proxies); err != nil {
+				return nil, err
+			}
+			return proxyscrapeToProxyStates(proxies), nil
+		}()
+		if err != nil {
+			continue
+		}
+		all = append(all, states...)
 	}
 
+	if len(all) == 0 {
+		return nil, errors.New("no proxyscrape proxies fetched")
+	}
+	return all, nil
+}
+
+func proxyscrapeToProxyStates(proxies []proxyscrapeProxy) []*proxyState {
+	states := make([]*proxyState, 0, len(proxies))
+
+	for _, p := range proxies {
+		scheme := p.Protocol
+		if scheme == "" {
+			scheme = "socks5"
+		}
+		rawURL := scheme + "://" + net.JoinHostPort(p.IP, fmt.Sprint(p.Port))
+		parsedURL, err := url.Parse(rawURL)
+		if err != nil {
+			continue
+		}
+
+		country := strings.ToUpper(strings.TrimSpace(p.CountryCode))
+		if country == "" {
+			country = "XX"
+		}
+
+		state := &proxyState{key: rawURL, url: parsedURL, country: country}
+
+		switch parsedURL.Scheme {
+		case "socks5", "socks5h":
+			d, err := proxy.FromURL(parsedURL, proxy.Direct)
+			if err == nil {
+				state.dialContext = d.(proxy.ContextDialer).DialContext
+			}
+		case "socks4", "socks4a":
+			d := socks.Dial(rawURL)
+			state.dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				type dialResult struct {
+					conn net.Conn
+					err  error
+				}
+				ch := make(chan dialResult, 1)
+				go func() {
+					conn, err := d(network, addr)
+					ch <- dialResult{conn, err}
+				}()
+				select {
+				case r := <-ch:
+					return r.conn, r.err
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		}
+
+		if state.dialContext != nil {
+			states = append(states, state)
+		}
+	}
+
+	return states
+}
+
+// ── Proxifly ──────────────────────────────────────────────────────────
+
+// NewProxiflyCountryPools fetches proxies from all sources, tests, groups by country.
+func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*proxyState, error) {
+	pf, pfErr := fetchProxiflyProxies()
+	ps, psErr := fetchProxyscrapeProxies()
+
+	if pfErr != nil && psErr != nil {
+		return nil, nil, fmt.Errorf("proxifly=%v, proxyscrape=%v", pfErr, psErr)
+	}
+
+	proxies := mergeProxyStates(pf, ps)
 	proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
 	groups := groupProxiesByCountry(proxies)
 
@@ -235,12 +342,14 @@ func startProxiflyRefresh(countryPools map[string]*ProxyPool, defaultPool *Proxy
 		defer ticker.Stop()
 
 		for range ticker.C {
-			proxies, err := fetchProxiflyProxies()
-			if err != nil {
-				logger.Printf("Proxifly refresh failed")
+			pf, pfErr := fetchProxiflyProxies()
+			ps, psErr := fetchProxyscrapeProxies()
+			if pfErr != nil && psErr != nil {
+				logger.Printf("Proxifly refresh failed: proxifly=%v, proxyscrape=%v", pfErr, psErr)
 				continue
 			}
 
+			proxies := mergeProxyStates(pf, ps)
 			proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
 			groups := groupProxiesByCountry(proxies)
 
@@ -252,9 +361,36 @@ func startProxiflyRefresh(countryPools map[string]*ProxyPool, defaultPool *Proxy
 				}
 			}
 
-			logger.Printf("Proxifly refreshed: %d healthy proxies", len(proxies))
+			logger.Printf("Proxies refreshed: %d healthy proxies", len(proxies))
 		}
 	}()
+}
+
+func mergeProxyStates(a, b []*proxyState) []*proxyState {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+
+	seen := make(map[string]bool, len(a))
+	result := make([]*proxyState, 0, len(a)+len(b))
+
+	for _, p := range a {
+		if p != nil && p.key != "" {
+			seen[p.key] = true
+			result = append(result, p)
+		}
+	}
+	for _, p := range b {
+		if p != nil && p.key != "" && !seen[p.key] {
+			seen[p.key] = true
+			result = append(result, p)
+		}
+	}
+
+	return result
 }
 
 // ── Health check ──────────────────────────────────────────────────────
