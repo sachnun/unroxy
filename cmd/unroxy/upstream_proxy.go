@@ -26,6 +26,7 @@ const (
 	proxiflyFetchTimeout   = 30 * time.Second
 	proxiflyRefreshEvery   = 15 * time.Minute
 	healthCheckConcurrency = 50
+	maxProxyRetries        = 3
 )
 
 var (
@@ -455,7 +456,16 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	var lastErr error
+	attempts := 0
 	for _, candidate := range candidates {
+		attempts++
+		if attempts > maxProxyRetries {
+			logger.Printf("[MAX RETRY] %s exhausted after %d attempts", targetLog, maxProxyRetries)
+			if lastErr == nil {
+				lastErr = errNoUpstreamProxy
+			}
+			break
+		}
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
@@ -496,7 +506,13 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 	logger := t.transportLogger()
 
 	if len(candidates) > 0 {
+		attempts := 0
 		for _, candidate := range candidates {
+			attempts++
+			if attempts > maxProxyRetries {
+				logger.Printf("[MAX RETRY] CONNECT %s exhausted after %d attempts", addr, maxProxyRetries)
+				break
+			}
 			if candidate.dialContext == nil {
 				continue
 			}
