@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
+	"sort"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,6 +53,7 @@ type proxyState struct {
 	key         string
 	url         *url.URL
 	country     string
+	latency     time.Duration
 	healthy     bool
 	lastChecked time.Time
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -62,6 +63,7 @@ type proxyCandidate struct {
 	key         string
 	url         *url.URL
 	country     string
+	latency     time.Duration
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
@@ -294,7 +296,9 @@ func testProxyReachable(p *proxyState) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), proxyHealthTimeout)
 	defer cancel()
 
+	start := time.Now()
 	conn, err := p.dialContext(ctx, "tcp", "1.1.1.1:80")
+	p.latency = time.Since(start)
 	if err != nil {
 		return false
 	}
@@ -327,6 +331,7 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			key:         state.key,
 			url:         cloneURL(state.url),
 			country:     state.country,
+			latency:     state.latency,
 			dialContext: state.dialContext,
 		}
 
@@ -337,8 +342,8 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 		}
 	}
 
-	rand.Shuffle(len(ready), func(i, j int) { ready[i], ready[j] = ready[j], ready[i] })
-	rand.Shuffle(len(failed), func(i, j int) { failed[i], failed[j] = failed[j], failed[i] })
+	sort.SliceStable(ready, func(i, j int) bool { return ready[i].latency < ready[j].latency })
+	sort.SliceStable(failed, func(i, j int) bool { return failed[i].latency < failed[j].latency })
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
 	ordered = append(ordered, ready...)
@@ -402,6 +407,7 @@ func (p *ProxyPool) FindByKey(key string) *proxyCandidate {
 				key:         state.key,
 				url:         cloneURL(state.url),
 				country:     state.country,
+				latency:     state.latency,
 				dialContext: state.dialContext,
 			}
 		}
