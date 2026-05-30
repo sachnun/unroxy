@@ -9,11 +9,12 @@ import (
 	"io"
 	"log"
 	"net"
-	"sort"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -404,6 +405,8 @@ func testProxiesConcurrently(proxies []*proxyState, concurrency int, logger *log
 	healthy := make([]*proxyState, 0, len(proxies))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var tested int32
+	total := len(proxies)
 
 	for _, p := range proxies {
 		sem <- struct{}{}
@@ -417,10 +420,15 @@ func testProxiesConcurrently(proxies []*proxyState, concurrency int, logger *log
 				healthy = append(healthy, ps)
 				mu.Unlock()
 			}
+
+			if n := atomic.AddInt32(&tested, 1); n%500 == 0 || n == int32(total) {
+				logger.Printf("[CHECK] %d/%d, %d healthy", n, total, len(healthy))
+			}
 		}(p)
 	}
 
 	wg.Wait()
+	logger.Printf("[CHECK] %d proxies, %d healthy", total, len(healthy))
 	return healthy
 }
 
