@@ -27,7 +27,6 @@ const (
 	proxiflyFetchTimeout   = 30 * time.Second
 	proxiflyRefreshEvery   = 15 * time.Minute
 	healthCheckConcurrency = 50
-	maxProxyRetries        = 3
 )
 
 var (
@@ -465,7 +464,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	var lastErr error
-	proxyErrors := 0
 	for _, candidate := range candidates {
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
@@ -474,13 +472,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				t.pool.MarkFailure(candidate.key, targetHost)
 				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
 				lastErr = err
-				break
-			}
-			proxyErrors++
-			if proxyErrors > maxProxyRetries {
-				if lastErr == nil {
-					lastErr = errNoUpstreamProxy
-				}
 				break
 			}
 			t.pool.MarkFailure(candidate.key, targetHost)
@@ -520,7 +511,6 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 	logger := t.transportLogger()
 
 	if len(candidates) > 0 {
-		proxyErrors := 0
 		for _, candidate := range candidates {
 			if candidate.dialContext == nil {
 				continue
@@ -531,10 +521,6 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 				if isHostUnreachable(err) {
 					t.pool.MarkFailure(candidate.key, targetHost)
 					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
-					break
-				}
-				proxyErrors++
-				if proxyErrors > maxProxyRetries {
 					break
 				}
 				t.pool.MarkFailure(candidate.key, targetHost)
