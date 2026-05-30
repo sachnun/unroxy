@@ -225,14 +225,14 @@ func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, domain, path, qu
 			domain = parts[1]
 			path = "/"
 			if len(parts) > 2 {
-				path = "/" + parts[2]
+				path = "/" + strings.Join(parts[2:], "/")
 			}
 		}
 	} else {
 		domain = first
 		path = "/"
 		if len(parts) > 1 {
-			path = "/" + parts[1]
+			path = "/" + strings.Join(parts[1:], "/")
 		}
 	}
 
@@ -252,7 +252,7 @@ func (h *ProxyHandler) parseRequest(r *http.Request) (domain, path, query string
 	domain = parts[0]
 	path = "/"
 	if len(parts) > 1 {
-		path = "/" + parts[1]
+		path = "/" + strings.Join(parts[1:], "/")
 	}
 
 	query = r.URL.RawQuery
