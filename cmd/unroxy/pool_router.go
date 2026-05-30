@@ -62,14 +62,10 @@ func (r *PoolRouter) Has(name string) bool {
 	return false
 }
 
-// Default returns the default transport.
+// Default returns the default transport (all proxies, not a country pool).
 func (r *PoolRouter) Default() http.RoundTripper {
 	if r == nil {
 		return nil
-	}
-
-	if len(r.pools) > 0 {
-		return r.pools[0].Transport
 	}
 
 	return r.defaultTransport
