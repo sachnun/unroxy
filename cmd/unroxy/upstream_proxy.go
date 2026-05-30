@@ -27,7 +27,7 @@ const (
 	proxyHealthTimeout     = 3 * time.Second
 	proxiflyFetchTimeout   = 30 * time.Second
 	proxiflyRefreshEvery   = 15 * time.Minute
-	healthCheckConcurrency = 50
+	healthCheckConcurrency = 300
 	stickyProxyDuration    = 1 * time.Minute
 )
 
