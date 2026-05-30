@@ -6,14 +6,13 @@ Proxy server with URL rewriting.
 
 ```bash
 docker run \
-  -e API_KEY=xxx,zzz \
   -p 8080:8080 \
   ghcr.io/sachnun/unroxy
 
 curl http://localhost:8080/example.com
 ```
 
-Requests to the target origin always use rotating SOCKS5 direct proxies from [Webshare](https://dashboard.webshare.io/) free plans. The proxy list refreshes every 6 hours.
+Requests to the target origin always use rotating SOCKS5 and SOCKS4 public proxies from [Proxifly's free proxy list](https://github.com/proxifly/free-proxy-list). The proxy list is fetched every 15 minutes and each proxy is health-checked via TCP dial before being added to the pool.
 
 ## Development
 

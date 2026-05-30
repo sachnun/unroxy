@@ -284,11 +284,11 @@ func TestRequestTargetLogIncludesPathAndQuery(t *testing.T) {
 	}
 }
 
-func TestRotatingProxyTransportDoesNotRetryProxyError(t *testing.T) {
+func TestRotatingProxyTransportRetriesAllProxiesOnDialError(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
 			{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
-			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
+			{key: "http://alsobad:80", url: mustParseURL(t, "http://alsobad:80")},
 		},
 	}
 
@@ -302,10 +302,6 @@ func TestRotatingProxyTransportDoesNotRetryProxyError(t *testing.T) {
 			}
 
 			proxyCalls++
-			if proxyURL.Host != "bad:1080" {
-				return nil, errors.New("unexpected retry")
-			}
-
 			return nil, errors.New("dial failed")
 		}),
 	}
@@ -319,15 +315,9 @@ func TestRotatingProxyTransportDoesNotRetryProxyError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected RoundTrip error")
 	}
-	if !strings.Contains(err.Error(), "dial failed") {
-		t.Fatalf("expected proxy failure error, got %v", err)
-	}
-	if proxyCalls != 1 {
-		t.Fatalf("expected 1 proxy call, got %d", proxyCalls)
-	}
-	failed := pool.failedByHost["example.com"]["socks5://bad:1080"]
-	if !failed {
-		t.Fatalf("expected proxy error to move proxy behind healthy candidates")
+
+	if proxyCalls != 2 {
+		t.Fatalf("expected 2 proxy calls (both fail), got %d", proxyCalls)
 	}
 }
 

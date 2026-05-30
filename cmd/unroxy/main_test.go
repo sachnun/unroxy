@@ -2,49 +2,48 @@ package main
 
 import (
 	"bytes"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestNewCountryPoolRouterUsesWebshareAPIKeys(t *testing.T) {
-	t.Setenv(webshareAPIKeyEnv, "api-key")
-
+func TestNewCountryPoolRouterFetchesProxifly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Token api-key" {
-			t.Fatalf("unexpected authorization header %q", r.Header.Get("Authorization"))
+		if strings.Contains(r.URL.Path, "socks4") {
+			w.Write([]byte(`[]`))
+			return
 		}
-
-		switch r.URL.Path {
-		case "/api/v2/subscription/plan/":
-			io.WriteString(w, `{"results":[{"id":7,"status":"active","proxy_type":"free"},{"id":8,"status":"active","proxy_type":"shared"}]}`)
-		case "/api/v2/proxy/list/":
-			if r.URL.Query().Get("mode") != "direct" || r.URL.Query().Get("plan_id") != "7" {
-				t.Fatalf("unexpected proxy list query %q", r.URL.RawQuery)
-			}
-			io.WriteString(w, `{"next":null,"results":[{"id":"d-1","username":"user","password":"pass","proxy_address":"1.2.3.4","port":8080,"country_code":"US"}]}`)
-		default:
-			http.NotFound(w, r)
-		}
+		w.Write([]byte(`[
+			{"proxy":"socks5://1.2.3.4:1080","protocol":"socks5","ip":"1.2.3.4","port":1080,"https":false,"anonymity":"transparent","score":1,"geolocation":{"country":"US","city":"Ashburn"}},
+			{"proxy":"socks5://5.6.7.8:1080","protocol":"socks5","ip":"5.6.7.8","port":1080,"https":false,"anonymity":"elite","score":1,"geolocation":{"country":"DE","city":"Berlin"}}
+		]`))
 	}))
 	defer server.Close()
 
-	oldPlansURL := websharePlansURL
-	oldProxyListURL := webshareProxyListURL
-	oldClient := webshareAPIHTTPClient
-	websharePlansURL = server.URL + "/api/v2/subscription/plan/"
-	webshareProxyListURL = server.URL + "/api/v2/proxy/list/"
-	webshareAPIHTTPClient = server.Client()
-	defer func() {
-		websharePlansURL = oldPlansURL
-		webshareProxyListURL = oldProxyListURL
-		webshareAPIHTTPClient = oldClient
-	}()
+	oldBaseURL := proxiflyBaseURL
+	proxiflyBaseURL = server.URL + "/"
+	defer func() { proxiflyBaseURL = oldBaseURL }()
+
+	proxies, err := fetchProxiflyProxies()
+	if err != nil {
+		t.Fatalf("fetchProxiflyProxies failed: %v", err)
+	}
+
+	_ = proxies
+
+	// Verify at least parsing and fetch work (health check is tested separately)
+	if len(proxies) == 0 {
+		t.Fatal("expected at least some proxies to be parsed")
+	}
+}
+
+func TestNewCountryPoolRouterLogsProxiflyNotReady(t *testing.T) {
+	oldBaseURL := proxiflyBaseURL
+	proxiflyBaseURL = "http://127.0.0.1:1/nonexistent/"
+	defer func() { proxiflyBaseURL = oldBaseURL }()
 
 	var logs bytes.Buffer
 	logger := log.New(&logs, "", 0)
@@ -54,119 +53,81 @@ func TestNewCountryPoolRouterUsesWebshareAPIKeys(t *testing.T) {
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "Pool \"US\" ready: 1 proxies") {
-		t.Fatalf("expected country pool log, got %q", output)
-	}
-	if strings.Contains(output, "api-key") || strings.Contains(output, "user") || strings.Contains(output, "pass") {
-		t.Fatalf("Webshare secret leaked in logs: %q", output)
+	if !strings.Contains(output, "Proxifly proxy not ready") {
+		t.Fatalf("expected failure log, got %q", output)
 	}
 }
 
-func TestNewCountryPoolRouterLogsMissingWebshareAPIKey(t *testing.T) {
-	t.Setenv(webshareAPIKeyEnv, "")
+func TestProxiflyToProxyStatesBuildsSocks5Proxies(t *testing.T) {
+	proxies := proxiflyToProxyStates([]proxiflyProxy{
+		{Proxy: "socks5://1.2.3.4:1080", Protocol: "socks5", IP: "1.2.3.4", Port: 1080, GeoLocation: struct {
+			Country string `json:"country"`
+			City    string `json:"city"`
+		}{Country: "US"}},
+		{Proxy: "socks4://5.6.7.8:4145", Protocol: "socks4", IP: "5.6.7.8", Port: 4145, GeoLocation: struct {
+			Country string `json:"country"`
+			City    string `json:"city"`
+		}{Country: "DE"}},
+	})
 
-	var logs bytes.Buffer
-	logger := log.New(&logs, "", 0)
-	router := newCountryPoolRouter(logger)
-	if router == nil {
-		t.Fatal("newCountryPoolRouter() = nil, want non-nil router")
-	}
-
-	output := logs.String()
-	if !strings.Contains(output, "Webshare proxy not ready") {
-		t.Fatalf("expected API key failure log, got %q", output)
-	}
-}
-
-func TestParseWebshareAPIKeys(t *testing.T) {
-	apiKeys, err := parseWebshareAPIKeys(" first , second, ")
-	if err != nil {
-		t.Fatalf("parseWebshareAPIKeys returned error: %v", err)
-	}
-
-	want := []string{"first", "second"}
-	if len(apiKeys) != len(want) {
-		t.Fatalf("expected %d API keys, got %d", len(want), len(apiKeys))
-	}
-	for i := range want {
-		if apiKeys[i] != want[i] {
-			t.Fatalf("API keys = %q, want %q", apiKeys, want)
-		}
-	}
-}
-
-func TestWebshareProxyStatesFromAPIBuildsCredentialedSocks5Proxies(t *testing.T) {
-	proxies, err := webshareProxyStatesFromAPI([]webshareProxy{
-		{ID: "d-1", ProxyAddress: "1.2.3.4", Port: 8080, Username: "user", Password: "pass"},
-		{ID: "d-2", ProxyAddress: "5.6.7.8", Port: 9090, Username: "user2", Password: "pass2"},
-	}, 0)
-	if err != nil {
-		t.Fatalf("webshareProxyStatesFromAPI returned error: %v", err)
-	}
-
-	pool := NewProxyPool(log.New(&bytes.Buffer{}, "", 0), proxies)
-	candidates := pool.Candidates(timeNow(), "example.com")
-	if len(candidates) != 2 {
-		t.Fatalf("expected 2 proxy candidates, got %d", len(candidates))
-	}
-
-	proxyURL := candidates[0].url
-	if proxyURL.Scheme != "socks5" {
-		t.Fatalf("expected socks5 proxy scheme, got %q", proxyURL.Scheme)
-	}
-	if proxyURL.Host != "1.2.3.4:8080" {
-		t.Fatalf("expected Webshare proxy host, got %q", proxyURL.Host)
-	}
-	username := proxyURL.User.Username()
-	password, _ := proxyURL.User.Password()
-	if username != "user" || password != "pass" {
-		t.Fatalf("unexpected proxy credentials in URL: %s", (&url.URL{Scheme: proxyURL.Scheme, Host: proxyURL.Host}).String())
-	}
-	if candidates[0].key != "socks5://1.2.3.4:8080#d-1" {
-		t.Fatalf("expected credential-free proxy key, got %q", candidates[0].key)
-	}
-}
-
-func TestFetchWebshareDirectProxyStatesUsesAPIURLAndAuthorization(t *testing.T) {
-	var requestedQueries []string
-	var serverURL string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Token api-key" {
-			t.Fatalf("unexpected authorization header %q", r.Header.Get("Authorization"))
-		}
-		requestedQueries = append(requestedQueries, r.URL.RawQuery)
-
-		switch r.URL.Query().Get("page") {
-		case "1":
-			io.WriteString(w, `{"next":"`+serverURL+`/api/v2/proxy/list/?mode=direct&page=2&page_size=100&plan_id=7","results":[{"id":"d-1","username":"user","password":"pass","proxy_address":"1.2.3.4","port":8080}]}`)
-		case "2":
-			io.WriteString(w, `{"next":null,"results":[{"id":"d-2","username":"user2","password":"pass2","proxy_address":"5.6.7.8","port":9090}]}`)
-		default:
-			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
-		}
-	}))
-	serverURL = server.URL
-	defer server.Close()
-
-	oldProxyListURL := webshareProxyListURL
-	webshareProxyListURL = server.URL + "/api/v2/proxy/list/"
-	defer func() { webshareProxyListURL = oldProxyListURL }()
-
-	proxies, err := fetchWebshareDirectProxyStates(server.Client(), "api-key", 7, 2)
-	if err != nil {
-		t.Fatalf("fetchWebshareDirectProxyStates returned error: %v", err)
-	}
 	if len(proxies) != 2 {
-		t.Fatalf("expected 2 proxies, got %d", len(proxies))
+		t.Fatalf("expected 2 proxy states, got %d", len(proxies))
 	}
-	if len(requestedQueries) != 2 || !strings.Contains(requestedQueries[0], "mode=direct") || !strings.Contains(requestedQueries[0], "plan_id=7") {
-		t.Fatalf("unexpected proxy list queries %q", requestedQueries)
+
+	if proxies[0].url.Scheme != "socks5" {
+		t.Fatalf("expected socks5 scheme, got %q", proxies[0].url.Scheme)
 	}
-	if proxies[0].key != "socks5://1.2.3.4:8080#d-1" {
-		t.Fatalf("unexpected proxy key %q", proxies[0].key)
+	if proxies[0].url.Host != "1.2.3.4:1080" {
+		t.Fatalf("expected host 1.2.3.4:1080, got %q", proxies[0].url.Host)
+	}
+	if proxies[0].country != "US" {
+		t.Fatalf("expected country US, got %q", proxies[0].country)
+	}
+	if proxies[0].key != "socks5://1.2.3.4:1080" {
+		t.Fatalf("expected key socks5://1.2.3.4:1080, got %q", proxies[0].key)
+	}
+	if proxies[0].dialContext == nil {
+		t.Fatal("expected SOCKS5 dialContext to be non-nil")
+	}
+
+	if proxies[1].url.Scheme != "socks4" {
+		t.Fatalf("expected socks4 scheme, got %q", proxies[1].url.Scheme)
+	}
+	if proxies[1].country != "DE" {
+		t.Fatalf("expected country DE, got %q", proxies[1].country)
+	}
+	if proxies[1].dialContext == nil {
+		t.Fatal("expected SOCKS4 dialContext to be non-nil")
 	}
 }
 
-func timeNow() time.Time {
-	return time.Now()
+func TestProxiflyToProxyStatesHandlesEmptyCountry(t *testing.T) {
+	proxies := proxiflyToProxyStates([]proxiflyProxy{
+		{Proxy: "socks5://1.2.3.4:1080", Protocol: "socks5", IP: "1.2.3.4", Port: 1080},
+	})
+
+	if len(proxies) != 1 {
+		t.Fatalf("expected 1 proxy state, got %d", len(proxies))
+	}
+
+	if proxies[0].country != "XX" {
+		t.Fatalf("expected country XX for empty, got %q", proxies[0].country)
+	}
+}
+
+func TestTestProxyReachableRefused(t *testing.T) {
+	proxies := proxiflyToProxyStates([]proxiflyProxy{
+		{Proxy: "socks5://127.0.0.1:1", Protocol: "socks5", IP: "127.0.0.1", Port: 1},
+	})
+
+	if testProxyReachable(proxies[0]) {
+		t.Fatal("expected proxy to be unreachable")
+	}
+}
+
+func TestTestProxyReachableNilDial(t *testing.T) {
+	p := &proxyState{key: "socks5://127.0.0.1:1", url: &url.URL{Scheme: "socks5", Host: "127.0.0.1:1"}}
+	if testProxyReachable(p) {
+		t.Fatal("expected proxy with nil dialContext to be unreachable")
+	}
 }

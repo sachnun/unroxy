@@ -29,15 +29,9 @@ func main() {
 }
 
 func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
-	apiKeyValue := os.Getenv(webshareAPIKeyEnv)
-	if apiKeyValue == "" {
-		logger.Printf("Webshare proxy not ready: %s must be set", webshareAPIKeyEnv)
-		return NewPoolRouter(nil, nil)
-	}
-
-	countryPools, allProxies, apiKeys, err := NewWebshareCountryPools(logger, apiKeyValue)
+	countryPools, allProxies, err := NewProxiflyCountryPools(logger)
 	if err != nil {
-		logger.Printf("Webshare proxy not ready")
+		logger.Printf("Proxifly proxy not ready: %v", err)
 		return NewPoolRouter(nil, nil)
 	}
 
@@ -61,7 +55,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 	logger.Printf("Total: %d proxies across %d countries", len(allProxies), len(countryPools))
 
 	// Start refresh for all pools
-	startCountryPoolsRefresh(countryPools, defaultPool, apiKeys, logger)
+	startProxiflyRefresh(countryPools, defaultPool, logger)
 
 	return NewPoolRouter(named, defaultTransport)
 }
