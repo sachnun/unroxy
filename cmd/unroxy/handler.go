@@ -25,45 +25,29 @@ type ProxyHandler struct {
 	router       *PoolRouter
 }
 
-// NewProxyHandler creates a new proxy handler
-func NewProxyHandler() *ProxyHandler {
-	return NewProxyHandlerWithLoggerAndTransport(log.Default(), nil)
-}
-
-// NewProxyHandlerWithTransport creates a new proxy handler with a custom transport.
-func NewProxyHandlerWithTransport(transport http.RoundTripper) *ProxyHandler {
-	return NewProxyHandlerWithLoggerAndTransport(log.Default(), transport)
-}
-
-// NewProxyHandlerWithLoggerAndTransport creates a new proxy handler with a logger and custom transport.
-func NewProxyHandlerWithLoggerAndTransport(logger *log.Logger, transport http.RoundTripper) *ProxyHandler {
+// NewProxyHandler creates a new proxy handler.
+// transport and router are optional; at most one should be set.
+func NewProxyHandler(logger *log.Logger, transportOrRouter interface{}) *ProxyHandler {
 	if logger == nil {
 		logger = log.Default()
 	}
 
-	return &ProxyHandler{
+	h := &ProxyHandler{
 		htmlRewriter: &rewriter.HTMLRewriter{},
 		cssRewriter:  &rewriter.CSSRewriter{},
 		jsRewriter:   &rewriter.JSRewriter{},
 		logger:       logger,
-		transport:    transport,
-	}
-}
-
-// NewProxyHandlerWithLoggerAndRouter creates a new proxy handler with a logger and pool router.
-func NewProxyHandlerWithLoggerAndRouter(logger *log.Logger, router *PoolRouter) *ProxyHandler {
-	if logger == nil {
-		logger = log.Default()
 	}
 
-	return &ProxyHandler{
-		htmlRewriter: &rewriter.HTMLRewriter{},
-		cssRewriter:  &rewriter.CSSRewriter{},
-		jsRewriter:   &rewriter.JSRewriter{},
-		logger:       logger,
-		router:       router,
-		transport:    router.Default(),
+	switch v := transportOrRouter.(type) {
+	case *PoolRouter:
+		h.router = v
+		h.transport = v.Default()
+	case http.RoundTripper:
+		h.transport = v
 	}
+
+	return h
 }
 
 // ServeHTTP handles incoming requests
@@ -238,25 +222,6 @@ func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, domain, path, qu
 
 	query = r.URL.RawQuery
 	return pool, domain, path, query
-}
-
-// parseRequest extracts domain, path, and query from request (legacy, no pool detection)
-func (h *ProxyHandler) parseRequest(r *http.Request) (domain, path, query string) {
-	fullPath := strings.TrimPrefix(r.URL.Path, "/")
-	parts := strings.SplitN(fullPath, "/", 2)
-
-	if len(parts) < 1 || parts[0] == "" {
-		return "", "", ""
-	}
-
-	domain = parts[0]
-	path = "/"
-	if len(parts) > 1 {
-		path = "/" + strings.Join(parts[1:], "/")
-	}
-
-	query = r.URL.RawQuery
-	return domain, path, query
 }
 
 // createProxy creates a configured reverse proxy for rewrite mode

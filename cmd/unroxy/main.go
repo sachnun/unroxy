@@ -16,7 +16,7 @@ func main() {
 
 	router := newCountryPoolRouter(logger)
 
-	handler := NewProxyHandlerWithLoggerAndRouter(logger, router)
+	handler := NewProxyHandler(logger, router)
 
 	logger.Printf("Unroxy running on :%s", port)
 	logger.Printf("Rewrite proxy:  http://localhost:%s/{domain}/{path}", port)

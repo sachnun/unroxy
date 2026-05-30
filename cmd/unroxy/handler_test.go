@@ -9,91 +9,8 @@ import (
 	"testing"
 )
 
-func TestProxyHandler_parseRequest(t *testing.T) {
-	h := NewProxyHandler()
-
-	tests := []struct {
-		name           string
-		path           string
-		query          string
-		expectedDomain string
-		expectedPath   string
-		expectedQuery  string
-	}{
-		{
-			name:           "simple domain and path",
-			path:           "/example.com/path/to/file",
-			query:          "",
-			expectedDomain: "example.com",
-			expectedPath:   "/path/to/file",
-			expectedQuery:  "",
-		},
-		{
-			name:           "domain only",
-			path:           "/example.com",
-			query:          "",
-			expectedDomain: "example.com",
-			expectedPath:   "/",
-			expectedQuery:  "",
-		},
-		{
-			name:           "domain with trailing slash",
-			path:           "/example.com/",
-			query:          "",
-			expectedDomain: "example.com",
-			expectedPath:   "/",
-			expectedQuery:  "",
-		},
-		{
-			name:           "with query string",
-			path:           "/example.com/search",
-			query:          "q=hello&page=1",
-			expectedDomain: "example.com",
-			expectedPath:   "/search",
-			expectedQuery:  "q=hello&page=1",
-		},
-		{
-			name:           "empty path",
-			path:           "/",
-			query:          "",
-			expectedDomain: "",
-			expectedPath:   "",
-			expectedQuery:  "",
-		},
-		{
-			name:           "subdomain",
-			path:           "/api.example.com/v1/users",
-			query:          "",
-			expectedDomain: "api.example.com",
-			expectedPath:   "/v1/users",
-			expectedQuery:  "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "http://proxy.local"+tt.path+"?"+tt.query, nil)
-			if tt.query == "" {
-				req = httptest.NewRequest("GET", "http://proxy.local"+tt.path, nil)
-			}
-
-			domain, path, query := h.parseRequest(req)
-
-			if domain != tt.expectedDomain {
-				t.Errorf("domain: got %q, want %q", domain, tt.expectedDomain)
-			}
-			if path != tt.expectedPath {
-				t.Errorf("path: got %q, want %q", path, tt.expectedPath)
-			}
-			if query != tt.expectedQuery {
-				t.Errorf("query: got %q, want %q", query, tt.expectedQuery)
-			}
-		})
-	}
-}
-
 func TestProxyHandler_ServeHTTP_InvalidPath(t *testing.T) {
-	h := NewProxyHandler()
+	h := NewProxyHandler(nil, nil)
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
 
@@ -124,7 +41,7 @@ func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
 			buildReq: func() *http.Request {
 				return httptest.NewRequest(http.MethodConnect, "http://proxy.local/example.com:443", nil)
 			},
-			wantCode: http.StatusInternalServerError, // transport is not *RotatingProxyTransport
+			wantCode: http.StatusInternalServerError,
 		},
 		{
 			name: "absolute URI routes to forward proxy",
@@ -144,7 +61,7 @@ func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewProxyHandlerWithTransport(mock)
+			h := NewProxyHandler(nil, mock)
 			req := tt.buildReq()
 			w := httptest.NewRecorder()
 
@@ -158,7 +75,7 @@ func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
 }
 
 func TestProxyHandler_ForwardProxy_UnsupportedScheme(t *testing.T) {
-	h := NewProxyHandlerWithTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	h := NewProxyHandler(nil, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
 	}))
 
@@ -174,7 +91,7 @@ func TestProxyHandler_ForwardProxy_UnsupportedScheme(t *testing.T) {
 
 func TestProxyHandler_ForwardProxy_ForwardsRequest(t *testing.T) {
 	var gotReq *http.Request
-	h := NewProxyHandlerWithLoggerAndTransport(
+	h := NewProxyHandler(
 		log.New(io.Discard, "", 0),
 		roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			gotReq = req
@@ -211,7 +128,7 @@ func TestProxyHandler_ForwardProxy_ForwardsRequest(t *testing.T) {
 }
 
 func TestProxyHandler_ConnectTunnel_NoRotatingTransport(t *testing.T) {
-	h := NewProxyHandler()
+	h := NewProxyHandler(nil, nil)
 	req := httptest.NewRequest(http.MethodConnect, "http://proxy.local/example.com:443", nil)
 	w := httptest.NewRecorder()
 
@@ -224,7 +141,7 @@ func TestProxyHandler_ConnectTunnel_NoRotatingTransport(t *testing.T) {
 
 func TestProxyHandler_RewriteProxy_Preserved(t *testing.T) {
 	var gotReq *http.Request
-	h := NewProxyHandlerWithLoggerAndTransport(
+	h := NewProxyHandler(
 		log.New(io.Discard, "", 0),
 		roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			gotReq = req
@@ -261,7 +178,7 @@ func TestProxyHandler_RewriteProxy_Preserved(t *testing.T) {
 }
 
 func TestNewProxyHandler(t *testing.T) {
-	h := NewProxyHandler()
+	h := NewProxyHandler(nil, nil)
 
 	if h == nil {
 		t.Error("Expected non-nil handler")
@@ -286,7 +203,7 @@ func TestNewProxyHandler(t *testing.T) {
 func TestProxyHandlerDoesNotLogRequestDetails(t *testing.T) {
 	var logs strings.Builder
 	logger := log.New(&logs, "", 0)
-	h := NewProxyHandlerWithLoggerAndTransport(logger, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	h := NewProxyHandler(logger, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("ok")),

@@ -48,14 +48,12 @@ type proxiflyProxy struct {
 }
 
 type proxyState struct {
-	key           string
-	url           *url.URL
-	country       string
-	healthy       bool
-	lastChecked   time.Time
-	verifiedAt    time.Time
-	verifiedHosts map[string]time.Time
-	dialContext   func(ctx context.Context, network, addr string) (net.Conn, error)
+	key         string
+	url         *url.URL
+	country     string
+	healthy     bool
+	lastChecked time.Time
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 type proxyCandidate struct {
@@ -199,15 +197,7 @@ func proxiflyToProxyStates(proxies []proxiflyProxy) []*proxyState {
 	return states
 }
 
-// NewProxiflyCountryPools fetches proxies from Proxifly, tests them, groups by country.
-func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*proxyState, error) {
-	proxies, err := fetchProxiflyProxies()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
-
+func groupProxiesByCountry(proxies []*proxyState) map[string][]*proxyState {
 	groups := make(map[string][]*proxyState)
 	for _, p := range proxies {
 		code := p.country
@@ -216,6 +206,18 @@ func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*prox
 		}
 		groups[code] = append(groups[code], p)
 	}
+	return groups
+}
+
+// NewProxiflyCountryPools fetches proxies from Proxifly, tests them, groups by country.
+func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*proxyState, error) {
+	proxies, err := fetchProxiflyProxies()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
+	groups := groupProxiesByCountry(proxies)
 
 	pools := make(map[string]*ProxyPool, len(groups))
 	for country, states := range groups {
@@ -238,15 +240,7 @@ func startProxiflyRefresh(countryPools map[string]*ProxyPool, defaultPool *Proxy
 			}
 
 			proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
-
-			groups := make(map[string][]*proxyState)
-			for _, p := range proxies {
-				code := p.country
-				if code == "" {
-					code = "XX"
-				}
-				groups[code] = append(groups[code], p)
-			}
+			groups := groupProxiesByCountry(proxies)
 
 			defaultPool.Replace(proxies)
 
@@ -269,17 +263,16 @@ func testProxiesConcurrently(proxies []*proxyState, concurrency int, logger *log
 	}
 
 	sem := make(chan struct{}, concurrency)
-	done := make(chan struct{}, len(proxies))
 	healthy := make([]*proxyState, 0, len(proxies))
 	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, p := range proxies {
 		sem <- struct{}{}
+		wg.Add(1)
 		go func(ps *proxyState) {
-			defer func() {
-				<-sem
-				done <- struct{}{}
-			}()
+			defer wg.Done()
+			defer func() { <-sem }()
 
 			if testProxyReachable(ps) {
 				mu.Lock()
@@ -289,11 +282,7 @@ func testProxiesConcurrently(proxies []*proxyState, concurrency int, logger *log
 		}(p)
 	}
 
-	// Wait for all checks to complete
-	for i := 0; i < len(proxies); i++ {
-		<-done
-	}
-
+	wg.Wait()
 	return healthy
 }
 
@@ -363,10 +352,6 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 }
 
 func (p *ProxyPool) MarkSuccess(key, targetHost string) {
-	p.markSuccess(key, targetHost, true)
-}
-
-func (p *ProxyPool) markSuccess(key, targetHost string, verified bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -375,18 +360,8 @@ func (p *ProxyPool) markSuccess(key, targetHost string, verified bool) {
 			continue
 		}
 
-		now := time.Now()
 		state.healthy = true
-		state.lastChecked = now
-		if verified {
-			state.verifiedAt = now
-			if targetHost != "" {
-				if state.verifiedHosts == nil {
-					state.verifiedHosts = make(map[string]time.Time)
-				}
-				state.verifiedHosts[targetHost] = now
-			}
-		}
+		state.lastChecked = time.Now()
 		delete(p.failedByHost[strings.ToLower(strings.TrimSpace(targetHost))], key)
 		return
 	}
@@ -401,11 +376,8 @@ func (p *ProxyPool) MarkFailure(key, targetHost string) {
 			continue
 		}
 
-		now := time.Now()
 		state.healthy = false
-		state.lastChecked = now
-		state.verifiedAt = time.Time{}
-		state.verifiedHosts = nil
+		state.lastChecked = time.Now()
 		rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
 		if rotationKey != "" {
 			if p.failedByHost == nil {
@@ -436,15 +408,6 @@ func (p *ProxyPool) Replace(proxies []*proxyState) {
 		return
 	}
 	p.next %= len(p.proxies)
-}
-
-func hasVerifiedHost(state *proxyState, targetHost string) bool {
-	if state == nil || targetHost == "" || len(state.verifiedHosts) == 0 {
-		return false
-	}
-
-	_, ok := state.verifiedHosts[targetHost]
-	return ok
 }
 
 // ── Rotating proxy transport ──────────────────────────────────────────
@@ -565,19 +528,6 @@ func extractHost(addr string) string {
 }
 
 // ── Logging helpers ───────────────────────────────────────────────────
-
-func proxyLogAddress(proxyURL *url.URL) string {
-	if proxyURL == nil {
-		return "-"
-	}
-
-	host := proxyURL.Hostname()
-	if host == "" {
-		return proxyURL.Host
-	}
-
-	return host
-}
 
 func candidateLogAddress(c proxyCandidate) string {
 	host := c.url.Hostname()
@@ -713,54 +663,6 @@ func cloneRequestForProxy(req *http.Request, proxyURL *url.URL, body []byte, has
 	return attemptReq
 }
 
-func appendCandidatesByProtocolPriority(dst []proxyCandidate, candidates []proxyCandidate) []proxyCandidate {
-	if len(candidates) == 0 {
-		return dst
-	}
-
-	socks5 := make([]proxyCandidate, 0, len(candidates))
-	socks4 := make([]proxyCandidate, 0, len(candidates))
-	httpCandidates := make([]proxyCandidate, 0, len(candidates))
-	other := make([]proxyCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
-		switch proxySchemePriority(candidate.url) {
-		case 0:
-			socks5 = append(socks5, candidate)
-		case 1:
-			socks4 = append(socks4, candidate)
-		case 2:
-			httpCandidates = append(httpCandidates, candidate)
-		default:
-			other = append(other, candidate)
-		}
-	}
-
-	dst = append(dst, socks5...)
-	dst = append(dst, socks4...)
-	dst = append(dst, httpCandidates...)
-	dst = append(dst, other...)
-	return dst
-}
-
-func proxySchemePriority(u *url.URL) int {
-	if u == nil {
-		return 3
-	}
-
-	switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
-	case "socks5", "socks5h":
-		return 0
-	case "socks4", "socks4a":
-		return 1
-	case "https":
-		return 2
-	case "http":
-		return 3
-	default:
-		return 4
-	}
-}
-
 func shouldRetryStatus(statusCode int) bool {
 	return statusCode == http.StatusTooManyRequests
 }
@@ -778,21 +680,7 @@ func cloneProxyStates(proxies []*proxyState) []*proxyState {
 
 		state := *proxy
 		state.url = cloneURL(proxy.url)
-		state.verifiedHosts = cloneVerifiedHosts(proxy.verifiedHosts)
 		cloned = append(cloned, &state)
-	}
-
-	return cloned
-}
-
-func cloneVerifiedHosts(verifiedHosts map[string]time.Time) map[string]time.Time {
-	if len(verifiedHosts) == 0 {
-		return nil
-	}
-
-	cloned := make(map[string]time.Time, len(verifiedHosts))
-	for host, verifiedAt := range verifiedHosts {
-		cloned[host] = verifiedAt
 	}
 
 	return cloned

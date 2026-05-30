@@ -5,12 +5,6 @@ import (
 	"strings"
 )
 
-// Rewriter interface for content rewriting
-type Rewriter interface {
-	Rewrite(body []byte, domain, proxyBase string) []byte
-	SupportedContentType() string
-}
-
 // ToProxyURL converts a URL to a proxied URL
 // Examples:
 //   - /path/to/file -> /domain/path/to/file
@@ -80,29 +74,4 @@ func ToProxyURL(rawURL, domain, proxyBase string) string {
 	return rawURL
 }
 
-// IsAbsoluteURL checks if the URL is absolute
-func IsAbsoluteURL(rawURL string) bool {
-	return strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")
-}
 
-// IsProtocolRelative checks if URL starts with //
-func IsProtocolRelative(rawURL string) bool {
-	return strings.HasPrefix(rawURL, "//")
-}
-
-// IsRootRelative checks if URL starts with / but not //
-func IsRootRelative(rawURL string) bool {
-	return strings.HasPrefix(rawURL, "/") && !strings.HasPrefix(rawURL, "//")
-}
-
-// ExtractDomain extracts domain from URL
-func ExtractDomain(rawURL string) string {
-	if strings.HasPrefix(rawURL, "//") {
-		rawURL = "https:" + rawURL
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-	return parsed.Host
-}

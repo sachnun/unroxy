@@ -63,7 +63,7 @@ func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
 			{key: "http://failed:80", url: mustParseURL(t, "http://failed:80")},
-			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-30 * time.Second)},
+			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
 			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
 		},
 		failedByHost: map[string]map[string]bool{
@@ -151,12 +151,12 @@ func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	}
 }
 
-func TestProxyPoolCandidatesRotateEvenForVerifiedHost(t *testing.T) {
+func TestProxyPoolCandidatesRotateForHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
-			{key: "http://global:80", url: mustParseURL(t, "http://global:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-time.Minute)},
-			{key: "http://host:80", url: mustParseURL(t, "http://host:80"), healthy: true, lastChecked: now.Add(-time.Minute), verifiedAt: now.Add(-time.Minute), verifiedHosts: map[string]time.Time{"opencode.ai": now.Add(-time.Minute)}},
+			{key: "http://global:80", url: mustParseURL(t, "http://global:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
+			{key: "http://host:80", url: mustParseURL(t, "http://host:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
 			{key: "http://probed:80", url: mustParseURL(t, "http://probed:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
 		},
 	}
