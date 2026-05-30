@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 const (
@@ -490,6 +492,49 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	return nil, lastErr
+}
+
+// DialContext dials a raw TCP connection through the upstream SOCKS5 proxy pool.
+// Falls back to direct connection if pool is empty.
+func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	targetHost := extractHost(addr)
+
+	now := time.Now()
+	candidates := t.pool.Candidates(now, targetHost)
+
+	logger := t.transportLogger()
+
+	if len(candidates) > 0 {
+		for _, candidate := range candidates {
+			dialer, err := proxy.FromURL(candidate.url, proxy.Direct)
+			if err != nil {
+				continue
+			}
+
+			conn, err := dialer.(proxy.ContextDialer).DialContext(ctx, network, addr)
+			if err != nil {
+				t.pool.MarkFailure(candidate.key, targetHost)
+				logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, proxyLogAddress(candidate.url), err)
+				continue
+			}
+
+			t.pool.MarkSuccess(candidate.key, targetHost)
+			logger.Printf("[OK] CONNECT %s -> %s", addr, proxyLogAddress(candidate.url))
+			return conn, nil
+		}
+	}
+
+	// Fallback to direct connection
+	logger.Printf("[DIRECT] CONNECT %s (no proxy)", addr)
+	return (&net.Dialer{Timeout: proxyDialTimeout}).DialContext(ctx, network, addr)
+}
+
+func extractHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return strings.ToLower(host)
 }
 
 func proxyLogAddress(proxyURL *url.URL) string {

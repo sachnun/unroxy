@@ -5,10 +5,12 @@ import (
 	"compress/gzip"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"sync"
 
 	"unroxy/cmd/unroxy/rewriter"
 )
@@ -49,6 +51,18 @@ func NewProxyHandlerWithLoggerAndTransport(logger *log.Logger, transport http.Ro
 
 // ServeHTTP handles incoming requests
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodConnect:
+		h.handleConnectTunnel(w, r)
+	case r.URL.Host != "":
+		h.handleForwardProxy(w, r)
+	default:
+		h.handleRewriteProxy(w, r)
+	}
+}
+
+// handleRewriteProxy handles the URL-rewriting proxy mode: /domain/path
+func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request) {
 	domain, path, query := h.parseRequest(r)
 	if domain == "" {
 		http.Error(w, "Invalid path. Usage: /domain.com/path", http.StatusBadRequest)
@@ -57,6 +71,100 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxy := h.createProxy(domain, path, query)
 	proxy.ServeHTTP(w, r)
+}
+
+// handleForwardProxy handles standard HTTP forward proxy (absolute URI)
+func (h *ProxyHandler) handleForwardProxy(w http.ResponseWriter, r *http.Request) {
+	scheme := r.URL.Scheme
+	if scheme != "http" && scheme != "https" {
+		http.Error(w, "Unsupported scheme", http.StatusBadRequest)
+		return
+	}
+
+	domain := r.URL.Host
+	path := r.URL.Path
+	if path == "" {
+		path = "/"
+	}
+
+	proxy := h.createForwardProxy(scheme, domain, path, r.URL.RawQuery)
+	proxy.ServeHTTP(w, r)
+}
+
+// handleConnectTunnel handles CONNECT method (HTTPS tunnel)
+func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
+	target := r.Host
+	if target == "" {
+		target = r.URL.Host
+	}
+	if target == "" {
+		http.Error(w, "Missing target host", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure port is specified
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		target = net.JoinHostPort(target, "443")
+	}
+
+	// Get dialer and connect through upstream SOCKS5 pool
+	transport, ok := h.transport.(*RotatingProxyTransport)
+	if !ok || transport == nil {
+		http.Error(w, "Transport not available", http.StatusInternalServerError)
+		return
+	}
+
+	targetConn, err := transport.DialContext(r.Context(), "tcp", target)
+	if err != nil {
+		h.logger.Printf("[ERR] CONNECT %s: %v", target, err)
+		http.Error(w, "Failed to connect to target", http.StatusServiceUnavailable)
+		return
+	}
+	defer targetConn.Close()
+
+	// Hijack the client connection
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, bufReader, err := hj.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer clientConn.Close()
+
+	// Send 200 OK to establish tunnel
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
+		h.logger.Printf("[ERR] CONNECT %s: failed to send 200: %v", target, err)
+		return
+	}
+
+	h.logger.Printf("[OK] CONNECT tunnel %s established", target)
+
+	// Bridge connections bidirectionally
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		// Write any buffered data from Hijack to target
+		if n := bufReader.Reader.Buffered(); n > 0 {
+			io.CopyN(targetConn, bufReader, int64(n))
+		}
+		io.Copy(targetConn, clientConn)
+		targetConn.Close()
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, targetConn)
+		clientConn.Close()
+	}()
+
+	wg.Wait()
 }
 
 // parseRequest extracts domain, path, and query from request
@@ -141,6 +249,22 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 			resp.Header.Del("Content-Encoding")
 
 			return nil
+		},
+	}
+}
+
+// createForwardProxy creates a reverse proxy for standard HTTP forward proxy mode
+func (h *ProxyHandler) createForwardProxy(scheme, domain, path, query string) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		ErrorLog:  log.New(io.Discard, "", 0),
+		Transport: h.transport,
+		Director: func(req *http.Request) {
+			req.URL.Scheme = scheme
+			req.URL.Host = domain
+			req.URL.Path = path
+			req.URL.RawQuery = query
+
+			rewriter.RewriteRequestHeaders(req, domain)
 		},
 	}
 }
