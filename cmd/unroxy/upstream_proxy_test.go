@@ -228,6 +228,9 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 			{key: "https://blocked:443", url: mustParseURL(t, "https://blocked:443")},
 			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
 		},
+		failedByHost: map[string]map[string]bool{
+			"example.com": {"http://good:80": true},
+		},
 	}
 
 	directCalls := 0
@@ -440,17 +443,235 @@ func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	}
 }
 
-func TestNewProxyAwareTransportDisablesConnectionReuse(t *testing.T) {
+func TestNewProxyAwareTransportKeepAliveEnabled(t *testing.T) {
 	transport, ok := newProxyAwareTransport().(*http.Transport)
 	if !ok {
 		t.Fatalf("expected *http.Transport")
 	}
 
-	if !transport.DisableKeepAlives {
-		t.Fatalf("expected DisableKeepAlives to prevent proxy rotation bypass")
+	if transport.DisableKeepAlives {
+		t.Fatalf("expected DisableKeepAlives false for connection reuse")
 	}
 	if transport.ForceAttemptHTTP2 {
 		t.Fatalf("expected ForceAttemptHTTP2 disabled with per-request proxy rotation")
+	}
+}
+
+func TestRotatingProxyTransportStickyProxyReusesSameProxyForSameHost(t *testing.T) {
+	var proxyCalls []string
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "socks5://first:1080", url: mustParseURL(t, "socks5://first:1080")},
+			{key: "socks5://second:1080", url: mustParseURL(t, "socks5://second:1080")},
+		},
+	}
+
+	transport := &RotatingProxyTransport{
+		pool: pool,
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			if proxyURL != nil {
+				proxyCalls = append(proxyCalls, proxyURL.Host)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	req1, _ := http.NewRequest(http.MethodGet, "https://example.com/path", nil)
+	resp1, err := transport.RoundTrip(req1)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	resp1.Body.Close()
+
+	req2, _ := http.NewRequest(http.MethodGet, "https://example.com/other", nil)
+	resp2, err := transport.RoundTrip(req2)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	resp2.Body.Close()
+
+	if len(proxyCalls) != 2 {
+		t.Fatalf("expected 2 proxy calls, got %d", len(proxyCalls))
+	}
+	if proxyCalls[0] != proxyCalls[1] {
+		t.Fatalf("expected same proxy for both requests, got %q then %q", proxyCalls[0], proxyCalls[1])
+	}
+}
+
+func TestRotatingProxyTransportStickyProxyClearsOnDialError(t *testing.T) {
+	var proxyCalls []string
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
+			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
+		},
+	}
+
+	callCount := 0
+	transport := &RotatingProxyTransport{
+		pool: pool,
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			if proxyURL != nil {
+				proxyCalls = append(proxyCalls, proxyURL.Host)
+			}
+			callCount++
+			if proxyURL != nil && proxyURL.Host == "bad:1080" {
+				return nil, errors.New("dial failed")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	// First request: bad proxy is first in candidates, fails, then good succeeds
+	req1, _ := http.NewRequest(http.MethodGet, "https://example.com/path", nil)
+	resp1, err := transport.RoundTrip(req1)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	resp1.Body.Close()
+
+	// Second request: sticky should point to good, succeeds
+	req2, _ := http.NewRequest(http.MethodGet, "https://example.com/other", nil)
+	resp2, err := transport.RoundTrip(req2)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	resp2.Body.Close()
+
+	if len(proxyCalls) != 3 {
+		t.Fatalf("expected 3 proxy calls (bad fail, good ok, good sticky), got %d", len(proxyCalls))
+	}
+	if proxyCalls[1] != "good:1080" || proxyCalls[2] != "good:1080" {
+		t.Fatalf("expected sticky proxy to be good:1080, got calls: %v", proxyCalls)
+	}
+}
+
+func TestRotatingProxyTransportStickyProxyClearsOnRateLimit(t *testing.T) {
+	var proxyCalls []string
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "socks5://sticky:1080", url: mustParseURL(t, "socks5://sticky:1080")},
+			{key: "socks5://fallback:1080", url: mustParseURL(t, "socks5://fallback:1080")},
+		},
+	}
+
+	callCount := 0
+	transport := &RotatingProxyTransport{
+		pool: pool,
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			if proxyURL != nil {
+				proxyCalls = append(proxyCalls, proxyURL.Host)
+			}
+			callCount++
+			if callCount == 1 {
+				// First request succeeds via sticky
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}
+			// Second request: sticky gets 429
+			if proxyURL != nil && proxyURL.Host == "sticky:1080" {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader("rate limit")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}
+			// Fallback proxy works
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	req1, _ := http.NewRequest(http.MethodGet, "https://example.com/path", nil)
+	resp1, err := transport.RoundTrip(req1)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	resp1.Body.Close()
+
+	req2, _ := http.NewRequest(http.MethodGet, "https://example.com/other", nil)
+	resp2, err := transport.RoundTrip(req2)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	resp2.Body.Close()
+
+	if len(proxyCalls) != 3 {
+		t.Fatalf("expected 3 proxy calls (sticky ok, sticky 429, fallback ok), got %d: %v", len(proxyCalls), proxyCalls)
+	}
+	if proxyCalls[0] != "sticky:1080" || proxyCalls[1] != "sticky:1080" || proxyCalls[2] != "fallback:1080" {
+		t.Fatalf("expected sticky then fallback, got: %v", proxyCalls)
+	}
+}
+
+func TestRotatingProxyTransportStickyProxyDifferentHostsDifferentProxies(t *testing.T) {
+	proxyCalls := make(map[string]string) // request host -> proxy host
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "socks5://proxy-a:1080", url: mustParseURL(t, "socks5://proxy-a:1080")},
+			{key: "socks5://proxy-b:1080", url: mustParseURL(t, "socks5://proxy-b:1080")},
+		},
+	}
+
+	transport := &RotatingProxyTransport{
+		pool: pool,
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			if proxyURL != nil {
+				proxyCalls[req.URL.Host] = proxyURL.Host
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	for _, host := range []string{"api.example.com", "cdn.example.com"} {
+		req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/path", nil)
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("request to %s: %v", host, err)
+		}
+		resp.Body.Close()
+	}
+
+	// Second round to each host should reuse the same proxy (sticky)
+	for _, host := range []string{"api.example.com", "cdn.example.com"} {
+		req, _ := http.NewRequest(http.MethodGet, "https://"+host+"/other", nil)
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("request to %s: %v", host, err)
+		}
+		resp.Body.Close()
+	}
+
+	if proxyCalls["api.example.com"] == "" || proxyCalls["cdn.example.com"] == "" {
+		t.Fatalf("expected both hosts to have a proxy, got: %v", proxyCalls)
 	}
 }
 
