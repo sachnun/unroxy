@@ -325,7 +325,15 @@ func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*prox
 		return nil, nil, fmt.Errorf("proxifly=%v, proxyscrape=%v", pfErr, psErr)
 	}
 
+	if pfErr == nil {
+		logger.Printf("Proxifly: %d proxies", len(pf))
+	}
+	if psErr == nil {
+		logger.Printf("ProxyScrape: %d proxies", len(ps))
+	}
+
 	proxies := mergeProxyStates(pf, ps)
+	logger.Printf("Merged: %d proxies", len(proxies))
 	proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
 	groups := groupProxiesByCountry(proxies)
 
@@ -350,7 +358,15 @@ func startProxiflyRefresh(countryPools map[string]*ProxyPool, defaultPool *Proxy
 				continue
 			}
 
+			if pfErr == nil {
+				logger.Printf("Proxifly: %d proxies", len(pf))
+			}
+			if psErr == nil {
+				logger.Printf("ProxyScrape: %d proxies", len(ps))
+			}
+
 			proxies := mergeProxyStates(pf, ps)
+			logger.Printf("Merged: %d proxies", len(proxies))
 			proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
 			groups := groupProxiesByCountry(proxies)
 
