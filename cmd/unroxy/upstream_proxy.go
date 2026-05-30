@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -69,8 +70,6 @@ type ProxyPool struct {
 
 	mu           sync.RWMutex
 	proxies      []*proxyState
-	next         int
-	nextByHost   map[string]int
 	failedByHost map[string]map[string]bool
 }
 
@@ -313,24 +312,16 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 		return nil
 	}
 
-	start := p.next
 	rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
-	if rotationKey == "" {
-		p.next = (start + 1) % len(p.proxies)
-	} else {
-		if p.nextByHost == nil {
-			p.nextByHost = make(map[string]int)
-		}
-		start = p.nextByHost[rotationKey] % len(p.proxies)
-		p.nextByHost[rotationKey] = (start + 1) % len(p.proxies)
-	}
+	failedKeys := p.failedByHost[rotationKey]
 
 	ready := make([]proxyCandidate, 0, len(p.proxies))
 	failed := make([]proxyCandidate, 0, len(p.proxies))
-	failedKeys := p.failedByHost[rotationKey]
 
-	for i := 0; i < len(p.proxies); i++ {
-		state := p.proxies[(start+i)%len(p.proxies)]
+	for _, state := range p.proxies {
+		if state == nil || state.url == nil {
+			continue
+		}
 
 		candidate := proxyCandidate{
 			key:         state.key,
@@ -338,13 +329,16 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			country:     state.country,
 			dialContext: state.dialContext,
 		}
+
 		if failedKeys[state.key] {
 			failed = append(failed, candidate)
-			continue
+		} else {
+			ready = append(ready, candidate)
 		}
-
-		ready = append(ready, candidate)
 	}
+
+	rand.Shuffle(len(ready), func(i, j int) { ready[i], ready[j] = ready[j], ready[i] })
+	rand.Shuffle(len(failed), func(i, j int) { failed[i], failed[j] = failed[j], failed[i] })
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
 	ordered = append(ordered, ready...)
@@ -404,11 +398,26 @@ func (p *ProxyPool) Replace(proxies []*proxyState) {
 	defer p.mu.Unlock()
 
 	p.proxies = cloneProxyStates(proxies)
-	if len(p.proxies) == 0 {
-		p.next = 0
-		return
+
+	// Build set of current proxy keys
+	newKeys := make(map[string]bool, len(proxies))
+	for _, pr := range proxies {
+		if pr != nil {
+			newKeys[pr.key] = true
+		}
 	}
-	p.next %= len(p.proxies)
+
+	// Prune failedByHost: remove entries for proxies no longer in pool
+	for host, keys := range p.failedByHost {
+		for key := range keys {
+			if !newKeys[key] {
+				delete(keys, key)
+			}
+		}
+		if len(keys) == 0 {
+			delete(p.failedByHost, host)
+		}
+	}
 }
 
 // ── Rotating proxy transport ──────────────────────────────────────────
@@ -456,19 +465,24 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	var lastErr error
-	attempts := 0
+	proxyErrors := 0
 	for _, candidate := range candidates {
-		attempts++
-		if attempts > maxProxyRetries {
-			logger.Printf("[MAX RETRY] %s exhausted after %d attempts", targetLog, maxProxyRetries)
-			if lastErr == nil {
-				lastErr = errNoUpstreamProxy
-			}
-			break
-		}
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
+			if isHostUnreachable(err) {
+				t.pool.MarkFailure(candidate.key, targetHost)
+				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
+				lastErr = err
+				break
+			}
+			proxyErrors++
+			if proxyErrors > maxProxyRetries {
+				if lastErr == nil {
+					lastErr = errNoUpstreamProxy
+				}
+				break
+			}
 			t.pool.MarkFailure(candidate.key, targetHost)
 			logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
 			lastErr = err
@@ -506,19 +520,23 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 	logger := t.transportLogger()
 
 	if len(candidates) > 0 {
-		attempts := 0
+		proxyErrors := 0
 		for _, candidate := range candidates {
-			attempts++
-			if attempts > maxProxyRetries {
-				logger.Printf("[MAX RETRY] CONNECT %s exhausted after %d attempts", addr, maxProxyRetries)
-				break
-			}
 			if candidate.dialContext == nil {
 				continue
 			}
 
 			conn, err := candidate.dialContext(ctx, network, addr)
 			if err != nil {
+				if isHostUnreachable(err) {
+					t.pool.MarkFailure(candidate.key, targetHost)
+					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
+					break
+				}
+				proxyErrors++
+				if proxyErrors > maxProxyRetries {
+					break
+				}
 				t.pool.MarkFailure(candidate.key, targetHost)
 				logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
 				continue
@@ -681,6 +699,10 @@ func cloneRequestForProxy(req *http.Request, proxyURL *url.URL, body []byte, has
 
 func shouldRetryStatus(statusCode int) bool {
 	return statusCode == http.StatusTooManyRequests
+}
+
+func isHostUnreachable(err error) bool {
+	return strings.Contains(err.Error(), "host unreachable")
 }
 
 func cloneProxyStates(proxies []*proxyState) []*proxyState {

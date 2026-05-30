@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
+func TestProxyPoolCandidatesRandomOrder(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
 			{key: "http://1.1.1.1:80", url: mustParseURL(t, "http://1.1.1.1:80")},
@@ -20,21 +20,26 @@ func TestProxyPoolCandidatesRoundRobin(t *testing.T) {
 		},
 	}
 
-	first := pool.Candidates(time.Now(), "")
-	if len(first) != 3 {
-		t.Fatalf("expected 3 candidates, got %d", len(first))
-	}
-	if first[0].key != "http://1.1.1.1:80" || first[1].key != "http://2.2.2.2:80" || first[2].key != "http://3.3.3.3:80" {
-		t.Fatalf("unexpected first candidate order: %q, %q, %q", first[0].key, first[1].key, first[2].key)
+	// Collect keys across multiple calls to ensure all proxies are present
+	seen := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		candidates := pool.Candidates(time.Now(), "")
+		if len(candidates) != 3 {
+			t.Fatalf("expected 3 candidates, got %d", len(candidates))
+		}
+		for _, c := range candidates {
+			seen[c.key] = true
+		}
 	}
 
-	second := pool.Candidates(time.Now(), "")
-	if second[0].key != "http://2.2.2.2:80" || second[1].key != "http://3.3.3.3:80" || second[2].key != "http://1.1.1.1:80" {
-		t.Fatalf("unexpected second candidate order: %q, %q, %q", second[0].key, second[1].key, second[2].key)
+	for _, key := range []string{"http://1.1.1.1:80", "http://2.2.2.2:80", "http://3.3.3.3:80"} {
+		if !seen[key] {
+			t.Fatalf("missing proxy %q in candidates", key)
+		}
 	}
 }
 
-func TestProxyPoolCandidatesRoundRobinPerHost(t *testing.T) {
+func TestProxyPoolCandidatesAllPresent(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*proxyState{
 			{key: "http://1.1.1.1:80", url: mustParseURL(t, "http://1.1.1.1:80")},
@@ -43,18 +48,18 @@ func TestProxyPoolCandidatesRoundRobinPerHost(t *testing.T) {
 		},
 	}
 
-	firstIPWho := pool.Candidates(time.Now(), "ipwho.is")
-	firstFavicon := pool.Candidates(time.Now(), "favicon.ico")
-	secondIPWho := pool.Candidates(time.Now(), "ipwho.is")
+	seen := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		candidates := pool.Candidates(time.Now(), "ipwho.is")
+		for _, c := range candidates {
+			seen[c.key] = true
+		}
+	}
 
-	if firstIPWho[0].key != "http://1.1.1.1:80" {
-		t.Fatalf("unexpected first ipwho.is proxy %q", firstIPWho[0].key)
-	}
-	if firstFavicon[0].key != "http://1.1.1.1:80" {
-		t.Fatalf("unexpected first favicon proxy %q", firstFavicon[0].key)
-	}
-	if secondIPWho[0].key != "http://2.2.2.2:80" {
-		t.Fatalf("unexpected second ipwho.is proxy %q", secondIPWho[0].key)
+	for _, key := range []string{"http://1.1.1.1:80", "http://2.2.2.2:80", "http://3.3.3.3:80"} {
+		if !seen[key] {
+			t.Fatalf("missing proxy %q in candidates", key)
+		}
 	}
 }
 
@@ -72,16 +77,24 @@ func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 	}
 
 	candidates := pool.Candidates(now, "ipwho.is")
-	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
-	want := []string{"http://verified:80", "http://untested:80", "http://failed:80"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("candidate order = %v, want %v", got, want)
-		}
+	if len(candidates) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(candidates))
+	}
+
+	// Ready proxies (verified, untested) should all come before the failed proxy
+	if candidates[2].key != "http://failed:80" {
+		t.Fatalf("expected failed proxy last, got order: %q, %q, %q",
+			candidates[0].key, candidates[1].key, candidates[2].key)
+	}
+
+	readyKeys := map[string]bool{"http://verified:80": true, "http://untested:80": true}
+	if !readyKeys[candidates[0].key] || !readyKeys[candidates[1].key] {
+		t.Fatalf("expected ready proxies first, got: %q, %q",
+			candidates[0].key, candidates[1].key)
 	}
 }
 
-func TestProxyPoolCandidatesPreserveRoundRobinOverProtocolPriority(t *testing.T) {
+func TestProxyPoolCandidatesAllPresentNoHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
@@ -91,13 +104,44 @@ func TestProxyPoolCandidatesPreserveRoundRobinOverProtocolPriority(t *testing.T)
 		},
 	}
 
-	candidates := pool.Candidates(now, "")
-	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
-	want := []string{"http://http:80", "https://https:443", "socks5://socks:1080"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("candidate order = %v, want %v", got, want)
+	seen := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		candidates := pool.Candidates(now, "")
+		for _, c := range candidates {
+			seen[c.key] = true
 		}
+	}
+
+	for _, key := range []string{"http://http:80", "https://https:443", "socks5://socks:1080"} {
+		if !seen[key] {
+			t.Fatalf("missing proxy %q in candidates", key)
+		}
+	}
+}
+
+func TestProxyPoolReplaceSwapsProxies(t *testing.T) {
+	pool := &ProxyPool{
+		proxies: []*proxyState{
+			{key: "http://old:80", url: mustParseURL(t, "http://old:80")},
+		},
+		failedByHost: map[string]map[string]bool{
+			"example.com": {"http://old:80": true},
+		},
+	}
+
+	pool.Replace([]*proxyState{
+		{key: "http://new1:80", url: mustParseURL(t, "http://new1:80")},
+		{key: "http://new2:80", url: mustParseURL(t, "http://new2:80")},
+	})
+
+	candidates := pool.Candidates(time.Now(), "")
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	}
+
+	// Old failed entry should be pruned since "http://old:80" no longer in pool
+	if len(pool.failedByHost) != 0 {
+		t.Fatalf("expected failedByHost to be pruned, got %v", pool.failedByHost)
 	}
 }
 
@@ -151,7 +195,7 @@ func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	}
 }
 
-func TestProxyPoolCandidatesRotateForHost(t *testing.T) {
+func TestProxyPoolCandidatesAllPresentWithHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*proxyState{
@@ -161,36 +205,18 @@ func TestProxyPoolCandidatesRotateForHost(t *testing.T) {
 		},
 	}
 
-	candidates := pool.Candidates(now, "opencode.ai")
-	got := []string{candidates[0].key, candidates[1].key, candidates[2].key}
-	want := []string{"http://global:80", "http://host:80", "http://probed:80"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("candidate order = %v, want %v", got, want)
+	seen := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		candidates := pool.Candidates(now, "opencode.ai")
+		for _, c := range candidates {
+			seen[c.key] = true
 		}
 	}
-}
 
-func TestProxyPoolReplaceSwapsProxiesAndPreservesRotationBounds(t *testing.T) {
-	now := time.Now()
-	pool := &ProxyPool{
-		next: 5,
-		proxies: []*proxyState{
-			{key: "http://old:80", url: mustParseURL(t, "http://old:80")},
-		},
-	}
-
-	pool.Replace([]*proxyState{
-		{key: "http://new1:80", url: mustParseURL(t, "http://new1:80")},
-		{key: "http://new2:80", url: mustParseURL(t, "http://new2:80")},
-	})
-
-	candidates := pool.Candidates(now, "")
-	if len(candidates) != 2 {
-		t.Fatalf("expected 2 candidates, got %d", len(candidates))
-	}
-	if candidates[0].key != "http://new2:80" || candidates[1].key != "http://new1:80" {
-		t.Fatalf("unexpected candidate order after replace: %q, %q", candidates[0].key, candidates[1].key)
+	for _, key := range []string{"http://global:80", "http://host:80", "http://probed:80"} {
+		if !seen[key] {
+			t.Fatalf("missing proxy %q in candidates", key)
+		}
 	}
 }
 
@@ -260,8 +286,14 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 	if directCalls != 0 {
 		t.Fatalf("expected 0 direct calls, got %d", directCalls)
 	}
-	if !pool.proxies[1].healthy {
-		t.Fatalf("expected successful proxy to be marked healthy")
+	healthyCount := 0
+	for _, p := range pool.proxies {
+		if p.healthy {
+			healthyCount++
+		}
+	}
+	if healthyCount != 1 {
+		t.Fatalf("expected exactly 1 healthy proxy, got %d", healthyCount)
 	}
 
 	output := logs.String()
