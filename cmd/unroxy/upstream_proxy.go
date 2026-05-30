@@ -35,6 +35,7 @@ var (
 type proxyState struct {
 	key           string
 	url           *url.URL
+	country       string
 	healthy       bool
 	lastChecked   time.Time
 	verifiedAt    time.Time
@@ -42,8 +43,9 @@ type proxyState struct {
 }
 
 type proxyCandidate struct {
-	key string
-	url *url.URL
+	key     string
+	url     *url.URL
+	country string
 }
 
 type ProxyPool struct {
@@ -82,6 +84,37 @@ func NewWebshareProxyPool(logger *log.Logger, apiKeyValue string) (*ProxyPool, e
 	return pool, nil
 }
 
+// NewWebshareCountryPools fetches proxies from Webshare and groups them by country.
+// Returns: country→pool map, all proxy states (ungrouped), apiKeys, error.
+func NewWebshareCountryPools(logger *log.Logger, apiKeyValue string) (map[string]*ProxyPool, []*proxyState, []string, error) {
+	apiKeys, err := parseWebshareAPIKeys(apiKeyValue)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	proxies, err := fetchWebshareProxyStates(webshareAPIHTTPClient, apiKeys)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Group by country
+	groups := make(map[string][]*proxyState)
+	for _, p := range proxies {
+		code := p.country
+		if code == "" {
+			code = "XX"
+		}
+		groups[code] = append(groups[code], p)
+	}
+
+	pools := make(map[string]*ProxyPool, len(groups))
+	for country, states := range groups {
+		pools[country] = NewProxyPool(logger, states)
+	}
+
+	return pools, proxies, apiKeys, nil
+}
+
 func startWebshareProxyRefresh(pool *ProxyPool, apiKeys []string) {
 	if pool == nil || len(apiKeys) == 0 {
 		return
@@ -101,6 +134,48 @@ func startWebshareProxyRefresh(pool *ProxyPool, apiKeys []string) {
 
 			pool.Replace(proxies)
 			pool.logger.Printf("Webshare proxy refreshed: %d proxies", pool.Count())
+		}
+	}()
+}
+
+func startCountryPoolsRefresh(countryPools map[string]*ProxyPool, defaultPool *ProxyPool, apiKeys []string, logger *log.Logger) {
+	if len(apiKeys) == 0 {
+		return
+	}
+
+	keys := append([]string(nil), apiKeys...)
+	go func() {
+		ticker := time.NewTicker(webshareRefreshEvery)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			proxies, err := fetchWebshareProxyStates(webshareAPIHTTPClient, keys)
+			if err != nil {
+				logger.Printf("Webshare proxy refresh failed")
+				continue
+			}
+
+			// Re-group by country
+			groups := make(map[string][]*proxyState)
+			for _, p := range proxies {
+				code := p.country
+				if code == "" {
+					code = "XX"
+				}
+				groups[code] = append(groups[code], p)
+			}
+
+			// Update default pool with all proxies
+			defaultPool.Replace(proxies)
+
+			// Update each country pool
+			for country, states := range groups {
+				if pool, ok := countryPools[country]; ok {
+					pool.Replace(states)
+				}
+			}
+
+			logger.Printf("Webshare proxy refreshed: %d proxies", len(proxies))
 		}
 	}()
 }
@@ -158,6 +233,8 @@ type webshareProxy struct {
 	Password     string `json:"password"`
 	ProxyAddress string `json:"proxy_address"`
 	Port         int    `json:"port"`
+	CountryCode  string `json:"country_code"`
+	CityName     string `json:"city_name"`
 }
 
 type webshareProxyListResponse struct {
@@ -275,6 +352,8 @@ func webshareProxyStatesFromAPI(apiProxies []webshareProxy, keyOffset int) ([]*p
 			return nil, errors.New("invalid Webshare proxy API response")
 		}
 
+		country := strings.ToUpper(strings.TrimSpace(apiProxy.CountryCode))
+
 		hostPort := net.JoinHostPort(host, fmt.Sprint(port))
 		proxyURL := &url.URL{
 			Scheme: "socks5",
@@ -286,8 +365,9 @@ func webshareProxyStatesFromAPI(apiProxies []webshareProxy, keyOffset int) ([]*p
 			keyID = fmt.Sprint(keyOffset + len(proxies) + 1)
 		}
 		proxies = append(proxies, &proxyState{
-			key: fmt.Sprintf("socks5://%s#%s", hostPort, keyID),
-			url: proxyURL,
+			key:     fmt.Sprintf("socks5://%s#%s", hostPort, keyID),
+			url:     proxyURL,
+			country: country,
 		})
 	}
 
@@ -321,7 +401,7 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	for i := 0; i < len(p.proxies); i++ {
 		state := p.proxies[(start+i)%len(p.proxies)]
 
-		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url)}
+		candidate := proxyCandidate{key: state.key, url: cloneURL(state.url), country: state.country}
 		if failedKeys[state.key] {
 			failed = append(failed, candidate)
 			continue
@@ -469,7 +549,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		resp, err := t.transport.RoundTrip(attemptReq)
 		if err != nil {
 			t.pool.MarkFailure(candidate.key, targetHost)
-			logger.Printf("[ERR] %s -> %s (%v)", targetLog, proxyLogAddress(candidate.url), err)
+			logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
 			return nil, err
 		}
 
@@ -477,13 +557,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			t.pool.MarkFailure(candidate.key, targetHost)
-			logger.Printf("[RETRY] %s -> %s (%d)", targetLog, proxyLogAddress(candidate.url), resp.StatusCode)
+			logger.Printf("[RETRY] %s -> %s (%d)", targetLog, candidateLogAddress(candidate), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("[OK] %s -> %s (%d)", targetLog, proxyLogAddress(candidate.url), resp.StatusCode)
+		logger.Printf("[OK] %s -> %s (%d)", targetLog, candidateLogAddress(candidate), resp.StatusCode)
 		return resp, nil
 	}
 
@@ -514,12 +594,12 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 			conn, err := dialer.(proxy.ContextDialer).DialContext(ctx, network, addr)
 			if err != nil {
 				t.pool.MarkFailure(candidate.key, targetHost)
-				logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, proxyLogAddress(candidate.url), err)
+				logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
 				continue
 			}
 
 			t.pool.MarkSuccess(candidate.key, targetHost)
-			logger.Printf("[OK] CONNECT %s -> %s", addr, proxyLogAddress(candidate.url))
+			logger.Printf("[OK] CONNECT %s -> %s", addr, candidateLogAddress(candidate))
 			return conn, nil
 		}
 	}
@@ -545,6 +625,19 @@ func proxyLogAddress(proxyURL *url.URL) string {
 	host := proxyURL.Hostname()
 	if host == "" {
 		return proxyURL.Host
+	}
+
+	return host
+}
+
+func candidateLogAddress(c proxyCandidate) string {
+	host := c.url.Hostname()
+	if host == "" {
+		host = c.url.Host
+	}
+
+	if c.country != "" {
+		return fmt.Sprintf("%s (%s)", host, c.country)
 	}
 
 	return host

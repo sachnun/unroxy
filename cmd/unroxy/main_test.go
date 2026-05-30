@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestNewUpstreamTransportUsesWebshareAPIKeys(t *testing.T) {
+func TestNewCountryPoolRouterUsesWebshareAPIKeys(t *testing.T) {
 	t.Setenv(webshareAPIKeyEnv, "api-key")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +27,7 @@ func TestNewUpstreamTransportUsesWebshareAPIKeys(t *testing.T) {
 			if r.URL.Query().Get("mode") != "direct" || r.URL.Query().Get("plan_id") != "7" {
 				t.Fatalf("unexpected proxy list query %q", r.URL.RawQuery)
 			}
-			io.WriteString(w, `{"next":null,"results":[{"id":"d-1","username":"user","password":"pass","proxy_address":"1.2.3.4","port":8080}]}`)
+			io.WriteString(w, `{"next":null,"results":[{"id":"d-1","username":"user","password":"pass","proxy_address":"1.2.3.4","port":8080,"country_code":"US"}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -47,35 +47,34 @@ func TestNewUpstreamTransportUsesWebshareAPIKeys(t *testing.T) {
 	}()
 
 	var logs bytes.Buffer
-	transport := newUpstreamTransport(log.New(&logs, "", 0))
-	if transport == nil {
-		t.Fatal("newUpstreamTransport() = nil, want non-nil transport")
+	logger := log.New(&logs, "", 0)
+	router := newCountryPoolRouter(logger)
+	if router == nil {
+		t.Fatal("newCountryPoolRouter() = nil, want non-nil router")
 	}
 
 	output := logs.String()
-	if !strings.Contains(output, "Proxy ready: 1 Webshare proxies") {
-		t.Fatalf("expected proxy mode log, got %q", output)
+	if !strings.Contains(output, "Pool \"US\" ready: 1 proxies") {
+		t.Fatalf("expected country pool log, got %q", output)
 	}
 	if strings.Contains(output, "api-key") || strings.Contains(output, "user") || strings.Contains(output, "pass") {
 		t.Fatalf("Webshare secret leaked in logs: %q", output)
 	}
 }
 
-func TestNewUpstreamTransportLogsMissingWebshareAPIKeyButStillReturnsTransport(t *testing.T) {
+func TestNewCountryPoolRouterLogsMissingWebshareAPIKey(t *testing.T) {
 	t.Setenv(webshareAPIKeyEnv, "")
 
 	var logs bytes.Buffer
-	transport := newUpstreamTransport(log.New(&logs, "", 0))
-	if transport == nil {
-		t.Fatal("newUpstreamTransport() = nil, want non-nil transport")
+	logger := log.New(&logs, "", 0)
+	router := newCountryPoolRouter(logger)
+	if router == nil {
+		t.Fatal("newCountryPoolRouter() = nil, want non-nil router")
 	}
 
 	output := logs.String()
 	if !strings.Contains(output, "Webshare proxy not ready") {
 		t.Fatalf("expected API key failure log, got %q", output)
-	}
-	if !strings.Contains(output, "Proxy ready: 0 Webshare proxies") {
-		t.Fatalf("expected proxy mode log, got %q", output)
 	}
 }
 

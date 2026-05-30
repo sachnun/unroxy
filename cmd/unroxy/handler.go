@@ -22,6 +22,7 @@ type ProxyHandler struct {
 	jsRewriter   *rewriter.JSRewriter
 	logger       *log.Logger
 	transport    http.RoundTripper
+	router       *PoolRouter
 }
 
 // NewProxyHandler creates a new proxy handler
@@ -49,6 +50,22 @@ func NewProxyHandlerWithLoggerAndTransport(logger *log.Logger, transport http.Ro
 	}
 }
 
+// NewProxyHandlerWithLoggerAndRouter creates a new proxy handler with a logger and pool router.
+func NewProxyHandlerWithLoggerAndRouter(logger *log.Logger, router *PoolRouter) *ProxyHandler {
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	return &ProxyHandler{
+		htmlRewriter: &rewriter.HTMLRewriter{},
+		cssRewriter:  &rewriter.CSSRewriter{},
+		jsRewriter:   &rewriter.JSRewriter{},
+		logger:       logger,
+		router:       router,
+		transport:    router.Default(),
+	}
+}
+
 // ServeHTTP handles incoming requests
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
@@ -61,15 +78,36 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRewriteProxy handles the URL-rewriting proxy mode: /domain/path
+// resolveTransport picks the transport based on request auth or path:
+//   - CONNECT/forward proxy: username from Proxy-Authorization selects country pool
+//   - rewrite proxy: first path segment matching a pool name selects country pool
+//   - no match / no auth: default transport (all proxies)
+func (h *ProxyHandler) resolveTransport(r *http.Request) http.RoundTripper {
+	username := AuthUsername(r)
+	if username != "" && h.router != nil {
+		if transport := h.router.Select(username); transport != nil {
+			return transport
+		}
+	}
+	return h.transport
+}
+
+// handleRewriteProxy handles the URL-rewriting proxy mode: /{pool}/{domain}/{path} or /{domain}/{path}
 func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request) {
-	domain, path, query := h.parseRequest(r)
+	poolName, domain, path, query := h.parsePoolRequest(r)
 	if domain == "" {
 		http.Error(w, "Invalid path. Usage: /domain.com/path", http.StatusBadRequest)
 		return
 	}
 
-	proxy := h.createProxy(domain, path, query)
+	transport := h.transport
+	if poolName != "" && h.router != nil {
+		if t := h.router.Select(poolName); t != nil {
+			transport = t
+		}
+	}
+
+	proxy := h.createProxy(domain, path, query, transport)
 	proxy.ServeHTTP(w, r)
 }
 
@@ -87,7 +125,8 @@ func (h *ProxyHandler) handleForwardProxy(w http.ResponseWriter, r *http.Request
 		path = "/"
 	}
 
-	proxy := h.createForwardProxy(scheme, domain, path, r.URL.RawQuery)
+	transport := h.resolveTransport(r)
+	proxy := h.createForwardProxy(scheme, domain, path, r.URL.RawQuery, transport)
 	proxy.ServeHTTP(w, r)
 }
 
@@ -107,14 +146,15 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 		target = net.JoinHostPort(target, "443")
 	}
 
-	// Get dialer and connect through upstream SOCKS5 pool
-	transport, ok := h.transport.(*RotatingProxyTransport)
-	if !ok || transport == nil {
+	// Select transport based on auth
+	transport := h.resolveTransport(r)
+	rt, ok := transport.(*RotatingProxyTransport)
+	if !ok || rt == nil {
 		http.Error(w, "Transport not available", http.StatusInternalServerError)
 		return
 	}
 
-	targetConn, err := transport.DialContext(r.Context(), "tcp", target)
+	targetConn, err := rt.DialContext(r.Context(), "tcp", target)
 	if err != nil {
 		h.logger.Printf("[ERR] CONNECT %s: %v", target, err)
 		http.Error(w, "Failed to connect to target", http.StatusServiceUnavailable)
@@ -150,7 +190,6 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 
 	go func() {
 		defer wg.Done()
-		// Write any buffered data from Hijack to target
 		if n := bufReader.Reader.Buffered(); n > 0 {
 			io.CopyN(targetConn, bufReader, int64(n))
 		}
@@ -167,7 +206,41 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 	wg.Wait()
 }
 
-// parseRequest extracts domain, path, and query from request
+// parsePoolRequest extracts pool name, domain, path, and query from request path.
+// Detects pool prefix: /{pool}/{domain}/{path} vs /{domain}/{path}
+func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, domain, path, query string) {
+	fullPath := strings.TrimPrefix(r.URL.Path, "/")
+	parts := strings.SplitN(fullPath, "/", 3)
+
+	if len(parts) < 1 || parts[0] == "" {
+		return "", "", "", ""
+	}
+
+	first := parts[0]
+
+	// Check if first segment is a pool name (no dots, matches known pool, case-insensitive)
+	if h.router != nil && !strings.Contains(first, ".") && h.router.Has(strings.ToUpper(first)) {
+		pool = strings.ToUpper(first)
+		if len(parts) > 1 {
+			domain = parts[1]
+			path = "/"
+			if len(parts) > 2 {
+				path = "/" + parts[2]
+			}
+		}
+	} else {
+		domain = first
+		path = "/"
+		if len(parts) > 1 {
+			path = "/" + parts[1]
+		}
+	}
+
+	query = r.URL.RawQuery
+	return pool, domain, path, query
+}
+
+// parseRequest extracts domain, path, and query from request (legacy, no pool detection)
 func (h *ProxyHandler) parseRequest(r *http.Request) (domain, path, query string) {
 	fullPath := strings.TrimPrefix(r.URL.Path, "/")
 	parts := strings.SplitN(fullPath, "/", 2)
@@ -182,17 +255,15 @@ func (h *ProxyHandler) parseRequest(r *http.Request) (domain, path, query string
 		path = "/" + parts[1]
 	}
 
-	// Preserve query string
 	query = r.URL.RawQuery
-
 	return domain, path, query
 }
 
-// createProxy creates a configured reverse proxy
-func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.ReverseProxy {
+// createProxy creates a configured reverse proxy for rewrite mode
+func (h *ProxyHandler) createProxy(domain, path, query string, transport http.RoundTripper) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		ErrorLog:  log.New(io.Discard, "", 0),
-		Transport: h.transport,
+		Transport: transport,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "https"
 			req.URL.Host = domain
@@ -206,13 +277,9 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 			resp.Header.Set("Pragma", "no-cache")
 			resp.Header.Set("Expires", "0")
 
-			// Rewrite response headers (Location, Set-Cookie, etc.)
 			rewriter.RewriteHeaders(resp, domain, "")
 
-			// Check content type for body rewriting
 			contentType := resp.Header.Get("Content-Type")
-
-			// Determine if we need to rewrite body
 			needsRewrite := strings.Contains(contentType, "text/html") ||
 				strings.Contains(contentType, "text/css") ||
 				strings.Contains(contentType, "javascript")
@@ -221,13 +288,11 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 				return nil
 			}
 
-			// Read response body
 			body, err := h.readResponseBody(resp)
 			if err != nil {
 				return err
 			}
 
-			// Rewrite body based on content type
 			var newBody []byte
 			switch {
 			case strings.Contains(contentType, "text/html"):
@@ -240,12 +305,9 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 				newBody = body
 			}
 
-			// Set new body
 			resp.Body = io.NopCloser(bytes.NewReader(newBody))
 			resp.ContentLength = int64(len(newBody))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
-
-			// Remove Content-Encoding since we've decompressed
 			resp.Header.Del("Content-Encoding")
 
 			return nil
@@ -254,10 +316,10 @@ func (h *ProxyHandler) createProxy(domain, path, query string) *httputil.Reverse
 }
 
 // createForwardProxy creates a reverse proxy for standard HTTP forward proxy mode
-func (h *ProxyHandler) createForwardProxy(scheme, domain, path, query string) *httputil.ReverseProxy {
+func (h *ProxyHandler) createForwardProxy(scheme, domain, path, query string, transport http.RoundTripper) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		ErrorLog:  log.New(io.Discard, "", 0),
-		Transport: h.transport,
+		Transport: transport,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = scheme
 			req.URL.Host = domain
@@ -273,7 +335,6 @@ func (h *ProxyHandler) createForwardProxy(scheme, domain, path, query string) *h
 func (h *ProxyHandler) readResponseBody(resp *http.Response) ([]byte, error) {
 	var reader io.Reader = resp.Body
 
-	// Handle gzip encoding
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		gzipReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
