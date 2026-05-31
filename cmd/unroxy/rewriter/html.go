@@ -1,153 +1,248 @@
 package rewriter
 
 import (
-	"regexp"
+	"bytes"
+	ht "html"
 	"strings"
+
+	"golang.org/x/net/html"
 )
 
-// HTMLRewriter handles HTML content rewriting
 type HTMLRewriter struct{}
 
-// Regex patterns for HTML attributes
-var (
-	// Match src, href, action, data-src, data-href, poster attributes
-	attrPattern = regexp.MustCompile(`(?i)(src|href|action|data-src|data-href|poster)=["']([^"']*?)["']`)
-
-	// Match srcset attribute (special format: url size, url size, ...)
-	srcsetPattern = regexp.MustCompile(`(?i)srcset=["']([^"']*?)["']`)
-
-	// Match content attribute in meta refresh
-	metaRefreshPattern = regexp.MustCompile(`(?i)<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']([^"']*?)["']`)
-
-	// Match inline style with url()
-	inlineStylePattern = regexp.MustCompile(`(?i)style=["']([^"']*?)["']`)
-
-	// Match <base href="...">
-	baseHrefPattern = regexp.MustCompile(`(?i)<base[^>]+href=["']([^"']*?)["']`)
-)
-
-// SupportedContentType returns the content type this rewriter handles
 func (r *HTMLRewriter) SupportedContentType() string {
 	return "text/html"
 }
 
-// Rewrite rewrites URLs in HTML content
 func (r *HTMLRewriter) Rewrite(body []byte, domain, proxyBase string) []byte {
-	html := string(body)
+	z := html.NewTokenizer(bytes.NewReader(body))
+	var out bytes.Buffer
 
-	// Remove or rewrite <base> tag to prevent it from affecting relative URLs
-	html = baseHrefPattern.ReplaceAllString(html, `<base href="`+proxyBase+"/"+domain+`/"`)
-
-	// Rewrite standard attributes (src, href, action, etc.)
-	html = attrPattern.ReplaceAllStringFunc(html, func(match string) string {
-		parts := attrPattern.FindStringSubmatch(match)
-		if len(parts) != 3 {
-			return match
+	for {
+		tt := z.Next()
+		switch tt {
+		case html.ErrorToken:
+			return out.Bytes()
+		case html.StartTagToken, html.SelfClosingTagToken:
+			r.rewriteTag(z, tt, domain, proxyBase, &out)
+		default:
+			out.Write(z.Raw())
 		}
-		attr := parts[1]
-		url := parts[2]
-
-		// Skip empty URLs
-		if url == "" {
-			return match
-		}
-
-		newURL := ToProxyURL(url, domain, proxyBase)
-		return attr + `="` + newURL + `"`
-	})
-
-	// Rewrite srcset attribute
-	html = srcsetPattern.ReplaceAllStringFunc(html, func(match string) string {
-		parts := srcsetPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		srcset := parts[1]
-		newSrcset := rewriteSrcset(srcset, domain, proxyBase)
-		return `srcset="` + newSrcset + `"`
-	})
-
-	// Rewrite meta refresh URLs
-	html = metaRefreshPattern.ReplaceAllStringFunc(html, func(match string) string {
-		parts := metaRefreshPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		content := parts[1]
-		newContent := rewriteMetaRefresh(content, domain, proxyBase)
-		return strings.Replace(match, parts[1], newContent, 1)
-	})
-
-	// Rewrite inline styles with url()
-	html = inlineStylePattern.ReplaceAllStringFunc(html, func(match string) string {
-		parts := inlineStylePattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-		style := parts[1]
-		if !strings.Contains(style, "url(") {
-			return match
-		}
-		newStyle := rewriteCSSURLs(style, domain, proxyBase)
-		return `style="` + newStyle + `"`
-	})
-
-	return []byte(html)
+	}
 }
 
-// rewriteSrcset rewrites URLs in srcset attribute
-// Format: "url1 1x, url2 2x" or "url1 100w, url2 200w"
-func rewriteSrcset(srcset, domain, proxyBase string) string {
+type htmlAttr struct {
+	name  string
+	value string
+}
+
+func (r *HTMLRewriter) rewriteTag(z *html.Tokenizer, tt html.TokenType, domain, proxyBase string, out *bytes.Buffer) {
+	tagNameB, hasAttr := z.TagName()
+	tagName := string(tagNameB)
+
+	if !hasAttr {
+		out.Write(z.Raw())
+		return
+	}
+
+	var attrs []htmlAttr
+	for hasAttr {
+		var k, v []byte
+		k, v, hasAttr = z.TagAttr()
+		attrs = append(attrs, htmlAttr{string(k), string(v)})
+	}
+
+	rewriteSet := make(map[int]bool)
+	for i, a := range attrs {
+		if shouldRewriteAttr(tagName, a.name, a.value) {
+			rewriteSet[i] = true
+		}
+	}
+
+	metaIdx := checkMetaRule(tagName, attrs)
+	if metaIdx >= 0 {
+		rewriteSet[metaIdx] = true
+	}
+
+	if len(rewriteSet) == 0 {
+		out.Write(z.Raw())
+		return
+	}
+
+	out.WriteByte('<')
+	out.Write(tagNameB)
+	for i, a := range attrs {
+		out.WriteByte(' ')
+		if rewriteSet[i] {
+			newVal := rewriteHTMLURL(tagName, attrs, a, domain, proxyBase)
+			writeAttr(out, a.name, newVal)
+		} else {
+			writeAttr(out, a.name, a.value)
+		}
+	}
+	if tt == html.SelfClosingTagToken {
+		out.WriteString(" />")
+	} else {
+		out.WriteByte('>')
+	}
+}
+
+var urlAttrs = map[string]bool{
+	"src": true, "href": true, "action": true, "cite": true,
+	"data": true, "formaction": true, "poster": true,
+	"longdesc": true, "background": true, "ping": true,
+	"srcset": true, "imagesrcset": true,
+	"xlink:href": true,
+	"style": true,
+	"data-src": true, "data-href": true,
+	"data-url": true, "data-image": true, "data-background": true,
+	"data-endpoint": true, "data-lazy": true,
+	"data-original": true, "data-load": true,
+	"data-srcset": true, "data-poster": true,
+}
+
+func shouldRewriteAttr(tagName, attrName, attrValue string) bool {
+	if urlAttrs[attrName] {
+		return true
+	}
+	if strings.HasPrefix(attrName, "data-") && looksLikeURL(attrValue) {
+		return true
+	}
+	return false
+}
+
+func looksLikeURL(v string) bool {
+	return strings.HasPrefix(v, "/") ||
+		strings.HasPrefix(v, "http://") ||
+		strings.HasPrefix(v, "https://") ||
+		strings.HasPrefix(v, "//")
+}
+
+var metaURLNames = map[string]bool{
+	"twitter:url": true, "twitter:image": true,
+	"msapplication-config": true,
+}
+
+func checkMetaRule(tagName string, attrs []htmlAttr) int {
+	if tagName != "meta" {
+		return -1
+	}
+
+	var httpEquiv, property, name string
+	contentIdx := -1
+
+	for i, a := range attrs {
+		switch a.name {
+		case "content":
+			contentIdx = i
+		case "http-equiv":
+			httpEquiv = strings.ToLower(a.value)
+		case "property":
+			property = strings.ToLower(a.value)
+		case "name":
+			name = strings.ToLower(a.value)
+		}
+	}
+
+	if contentIdx < 0 {
+		return -1
+	}
+
+	if httpEquiv == "refresh" {
+		return contentIdx
+	}
+	if strings.HasPrefix(property, "og:") || strings.HasPrefix(property, "twitter:") {
+		return contentIdx
+	}
+	if metaURLNames[name] {
+		return contentIdx
+	}
+	if strings.HasPrefix(name, "citation_") {
+		return contentIdx
+	}
+	return -1
+}
+
+func rewriteHTMLURL(tagName string, attrs []htmlAttr, a htmlAttr, domain, proxyBase string) string {
+	switch a.name {
+	case "srcset", "imagesrcset":
+		return rewriteImageSrcset(a.value, domain, proxyBase)
+	case "ping":
+		return rewritePingURLs(a.value, domain, proxyBase)
+	case "style":
+		css := CSSRewriter{}
+		return string(css.Rewrite([]byte(a.value), domain, proxyBase))
+	case "content":
+		if tagName == "meta" {
+			return rewriteMetaContent(attrs, a, domain, proxyBase)
+		}
+		return ToProxyURL(a.value, domain, proxyBase)
+	default:
+		return ToProxyURL(a.value, domain, proxyBase)
+	}
+}
+
+func rewriteImageSrcset(srcset, domain, proxyBase string) string {
 	entries := strings.Split(srcset, ",")
 	var result []string
-
 	for _, entry := range entries {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
 		}
-
-		// Split into URL and size descriptor
 		parts := strings.Fields(entry)
 		if len(parts) == 0 {
 			continue
 		}
-
 		url := parts[0]
 		newURL := ToProxyURL(url, domain, proxyBase)
-
 		if len(parts) > 1 {
 			result = append(result, newURL+" "+strings.Join(parts[1:], " "))
 		} else {
 			result = append(result, newURL)
 		}
 	}
-
 	return strings.Join(result, ", ")
 }
 
-// rewriteMetaRefresh rewrites URL in meta refresh content
-// Format: "5; url=/path" or "0;url=https://example.com"
-func rewriteMetaRefresh(content, domain, proxyBase string) string {
-	// Find URL part
-	lowerContent := strings.ToLower(content)
-	urlIdx := strings.Index(lowerContent, "url=")
-	if urlIdx == -1 {
-		return content
+func rewritePingURLs(ping, domain, proxyBase string) string {
+	urls := strings.Fields(ping)
+	var result []string
+	for _, u := range urls {
+		result = append(result, ToProxyURL(u, domain, proxyBase))
 	}
-
-	prefix := content[:urlIdx+4]
-	urlPart := strings.TrimSpace(content[urlIdx+4:])
-
-	// Remove surrounding quotes if present
-	urlPart = strings.Trim(urlPart, `"'`)
-
-	newURL := ToProxyURL(urlPart, domain, proxyBase)
-	return prefix + newURL
+	return strings.Join(result, " ")
 }
 
-// rewriteCSSURLs rewrites url() in CSS (used for inline styles)
-func rewriteCSSURLs(css, domain, proxyBase string) string {
-	cssRewriter := &CSSRewriter{}
-	return string(cssRewriter.Rewrite([]byte(css), domain, proxyBase))
+func rewriteMetaContent(attrs []htmlAttr, a htmlAttr, domain, proxyBase string) string {
+	var httpEquiv string
+	for _, attr := range attrs {
+		if attr.name == "http-equiv" {
+			httpEquiv = strings.ToLower(attr.value)
+			break
+		}
+	}
+	if httpEquiv == "refresh" {
+		lower := strings.ToLower(a.value)
+		urlIdx := strings.Index(lower, "url=")
+		if urlIdx < 0 {
+			return a.value
+		}
+		prefix := a.value[:urlIdx+4]
+		urlPart := strings.TrimSpace(a.value[urlIdx+4:])
+		urlPart = strings.Trim(urlPart, `"'`)
+		return prefix + ToProxyURL(urlPart, domain, proxyBase)
+	}
+	return ToProxyURL(a.value, domain, proxyBase)
+}
+
+func writeAttr(out *bytes.Buffer, name, value string) {
+	if value == "" {
+		out.WriteString(name)
+		return
+	}
+	out.WriteString(name)
+	out.WriteString(`="`)
+	out.WriteString(ht.EscapeString(value))
+	out.WriteByte('"')
 }

@@ -1,82 +1,84 @@
 package rewriter
 
 import (
-	"regexp"
+	"bytes"
+	"strconv"
 	"strings"
+
+	"github.com/tdewolff/parse/v2"
+	"github.com/tdewolff/parse/v2/css"
 )
 
-// CSSRewriter handles CSS content rewriting
 type CSSRewriter struct{}
 
-// Regex patterns for CSS
-var (
-	// Match url() in CSS - handles url(), url("..."), url('...')
-	// Go regex doesn't support backreferences, so we match all variants
-	cssURLPattern = regexp.MustCompile(`url\(\s*["']?([^"')]+)["']?\s*\)`)
-
-	// Match @import url("...") or @import "..."
-	cssImportURLPattern    = regexp.MustCompile(`@import\s+url\(\s*["']?([^"')]+)["']?\s*\)`)
-	cssImportStringPattern = regexp.MustCompile(`@import\s+["']([^"']+)["']`)
-)
-
-// SupportedContentType returns the content type this rewriter handles
 func (r *CSSRewriter) SupportedContentType() string {
 	return "text/css"
 }
 
-// Rewrite rewrites URLs in CSS content
 func (r *CSSRewriter) Rewrite(body []byte, domain, proxyBase string) []byte {
-	css := string(body)
+	input := parse.NewInputBytes(body)
+	l := css.NewLexer(input)
+	var out bytes.Buffer
+	atImport := false
 
-	// Rewrite @import url(...) statements
-	css = cssImportURLPattern.ReplaceAllStringFunc(css, func(match string) string {
-		parts := cssImportURLPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
+	for {
+		tt, data := l.Next()
+		if tt == css.ErrorToken {
+			break
 		}
 
-		url := strings.TrimSpace(parts[1])
-		if url == "" {
-			return match
+		switch tt {
+		case css.URLToken:
+			atImport = false
+			out.WriteString(rewriteCSSURL(string(data), domain, proxyBase))
+		case css.StringToken:
+			if atImport {
+				atImport = false
+				url := strings.Trim(string(data), "\"'")
+				rewritten := ToProxyURL(url, domain, proxyBase)
+				out.WriteString(strconv.Quote(rewritten))
+			} else {
+				out.Write(data)
+			}
+		case css.AtKeywordToken:
+			atImport = string(data) == "@import"
+			out.Write(data)
+		default:
+			if atImport && tt != css.WhitespaceToken {
+				atImport = false
+			}
+			out.Write(data)
 		}
+	}
 
-		newURL := ToProxyURL(url, domain, proxyBase)
-		return `@import url("` + newURL + `")`
-	})
+	return out.Bytes()
+}
 
-	// Rewrite @import "..." statements
-	css = cssImportStringPattern.ReplaceAllStringFunc(css, func(match string) string {
-		parts := cssImportStringPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
+func rewriteCSSURL(urlToken, domain, proxyBase string) string {
+	if len(urlToken) < 5 || !strings.HasPrefix(urlToken, "url(") {
+		return urlToken
+	}
+
+	lastParen := strings.LastIndex(urlToken, ")")
+	if lastParen < 4 {
+		return urlToken
+	}
+
+	var inner string
+	quoted := false
+
+	if lastParen >= 6 && (urlToken[4] == '"' || urlToken[4] == '\'') {
+		quote := urlToken[4]
+		if urlToken[lastParen-1] == quote {
+			inner = urlToken[5 : lastParen-1]
+			quoted = true
 		}
+	}
 
-		url := strings.TrimSpace(parts[1])
-		if url == "" {
-			return match
-		}
+	if !quoted {
+		inner = strings.TrimSpace(urlToken[4:lastParen])
+	}
 
-		newURL := ToProxyURL(url, domain, proxyBase)
-		return `@import "` + newURL + `"`
-	})
-
-	// Rewrite url() in CSS
-	css = cssURLPattern.ReplaceAllStringFunc(css, func(match string) string {
-		parts := cssURLPattern.FindStringSubmatch(match)
-		if len(parts) != 2 {
-			return match
-		}
-
-		url := strings.TrimSpace(parts[1])
-
-		// Skip data URIs and empty URLs
-		if url == "" || strings.HasPrefix(url, "data:") {
-			return match
-		}
-
-		newURL := ToProxyURL(url, domain, proxyBase)
-		return `url("` + newURL + `")`
-	})
-
-	return []byte(css)
+	rewritten := ToProxyURL(inner, domain, proxyBase)
+	return "url(" + strconv.Quote(rewritten) + ")"
 }
