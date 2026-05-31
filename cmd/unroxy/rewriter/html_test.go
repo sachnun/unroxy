@@ -305,6 +305,31 @@ func TestHTMLRewriter_VoidElements(t *testing.T) {
 	}
 }
 
+func TestHTMLRewriter_HeadInjection(t *testing.T) {
+	r := &HTMLRewriter{}
+	domain := "example.com"
+	proxyBase := ""
+
+	result := string(r.Rewrite([]byte("<head><title>Test</title></head>"), domain, proxyBase))
+	if !strings.Contains(result, "<script>") || !strings.Contains(result, "</script>") {
+		t.Errorf("Expected monkey-patch script to be injected after <head>, got: %s", result)
+	}
+	if !strings.Contains(result, "location.pathname") {
+		t.Errorf("Expected monkey-patch to contain URL rewriting logic, got: %s", result)
+	}
+}
+
+func TestHTMLRewriter_NoHeadNoInjection(t *testing.T) {
+	r := &HTMLRewriter{}
+	domain := "example.com"
+	proxyBase := ""
+
+	result := string(r.Rewrite([]byte("<body><p>No head here</p></body>"), domain, proxyBase))
+	if strings.Contains(result, "<script>") {
+		t.Errorf("Expected no injection when no <head>, got: %s", result)
+	}
+}
+
 func TestHTMLRewriter_EmptyAttribute(t *testing.T) {
 	r := &HTMLRewriter{}
 	domain := "example.com"

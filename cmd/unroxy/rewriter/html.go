@@ -42,6 +42,9 @@ func (r *HTMLRewriter) rewriteTag(z *html.Tokenizer, tt html.TokenType, domain, 
 
 	if !hasAttr {
 		out.Write(z.Raw())
+		if tagName == "head" && tt == html.StartTagToken {
+			writeMonitorPatch(out)
+		}
 		return
 	}
 
@@ -66,6 +69,9 @@ func (r *HTMLRewriter) rewriteTag(z *html.Tokenizer, tt html.TokenType, domain, 
 
 	if len(rewriteSet) == 0 {
 		out.Write(z.Raw())
+		if tagName == "head" && tt == html.StartTagToken {
+			writeMonitorPatch(out)
+		}
 		return
 	}
 
@@ -84,6 +90,9 @@ func (r *HTMLRewriter) rewriteTag(z *html.Tokenizer, tt html.TokenType, domain, 
 		out.WriteString(" />")
 	} else {
 		out.WriteByte('>')
+	}
+	if tagName == "head" && tt == html.StartTagToken {
+		writeMonitorPatch(out)
 	}
 }
 
@@ -245,4 +254,10 @@ func writeAttr(out *bytes.Buffer, name, value string) {
 	out.WriteString(`="`)
 	out.WriteString(ht.EscapeString(value))
 	out.WriteByte('"')
+}
+
+func writeMonitorPatch(out *bytes.Buffer) {
+	out.WriteString("<script>")
+	out.WriteString(MonitorPatch)
+	out.WriteString("</script>")
 }

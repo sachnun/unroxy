@@ -111,9 +111,9 @@ func TestJSRewriter_Rewrite(t *testing.T) {
 			contains: []string{`from './foo.js'`},
 		},
 		{
-			name:     "preserve external URL fetch",
+			name:     "rewrite external URL fetch",
 			input:    `fetch('https://api.example.com/data')`,
-			contains: []string{`fetch('https://api.example.com/data')`},
+			contains: []string{`fetch('/api.example.com/data')`},
 		},
 	}
 
