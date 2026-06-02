@@ -430,26 +430,7 @@ func (p *ProxyPool) Replace(proxies []*proxyState) {
 	defer p.mu.Unlock()
 
 	p.proxies = cloneProxyStates(proxies)
-
-	// Build set of current proxy keys
-	newKeys := make(map[string]bool, len(proxies))
-	for _, pr := range proxies {
-		if pr != nil {
-			newKeys[pr.key] = true
-		}
-	}
-
-	// Prune failedByHost: remove entries for proxies no longer in pool
-	for host, keys := range p.failedByHost {
-		for key := range keys {
-			if !newKeys[key] {
-				delete(keys, key)
-			}
-		}
-		if len(keys) == 0 {
-			delete(p.failedByHost, host)
-		}
-	}
+	p.failedByHost = nil
 }
 
 // ── Rotating proxy transport ──────────────────────────────────────────
