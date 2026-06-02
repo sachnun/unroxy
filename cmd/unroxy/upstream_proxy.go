@@ -28,7 +28,6 @@ const (
 	proxiflyFetchTimeout   = 30 * time.Second
 	proxiflyRefreshEvery   = 15 * time.Minute
 	healthCheckConcurrency = 300
-	stickyProxyDuration    = 1 * time.Minute
 )
 
 var (
@@ -319,8 +318,8 @@ func testProxyReachable(p *proxyState) bool {
 // ── Pool rotation ─────────────────────────────────────────────────────
 
 func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidate {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
 	if len(p.proxies) == 0 {
 		return nil
@@ -408,23 +407,6 @@ func (p *ProxyPool) Count() int {
 	return len(p.proxies)
 }
 
-func (p *ProxyPool) FindByKey(key string) *proxyCandidate {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, state := range p.proxies {
-		if state.key == key {
-			return &proxyCandidate{
-				key:         state.key,
-				url:         cloneURL(state.url),
-				country:     state.country,
-				latency:     state.latency,
-				dialContext: state.dialContext,
-			}
-		}
-	}
-	return nil
-}
-
 func (p *ProxyPool) Replace(proxies []*proxyState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -435,17 +417,10 @@ func (p *ProxyPool) Replace(proxies []*proxyState) {
 
 // ── Rotating proxy transport ──────────────────────────────────────────
 
-type stickyEntry struct {
-	key    string
-	expiry time.Time
-}
-
 type RotatingProxyTransport struct {
-	logger       *log.Logger
-	pool         *ProxyPool
-	transport    http.RoundTripper
-	stickyMu     sync.Mutex
-	stickyByHost map[string]stickyEntry
+	logger    *log.Logger
+	pool      *ProxyPool
+	transport http.RoundTripper
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -455,10 +430,9 @@ func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
 	}
 
 	return &RotatingProxyTransport{
-		logger:       logger,
-		pool:         pool,
-		transport:    newProxyAwareTransport(),
-		stickyByHost: make(map[string]stickyEntry),
+		logger:    logger,
+		pool:      pool,
+		transport: newProxyAwareTransport(),
 	}
 }
 
@@ -479,31 +453,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 
 	logger := t.transportLogger()
 	targetLog := requestTargetLog(req)
-
-	if stickyKey, ok := t.getStickyProxy(targetHost); ok {
-		if candidate := t.pool.FindByKey(stickyKey); candidate != nil {
-			attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
-			resp, err := t.transport.RoundTrip(attemptReq)
-			if err != nil {
-				t.pool.MarkFailure(candidate.key, targetHost)
-				t.clearStickyProxy(targetHost)
-				logger.Printf("[ERR] %s -> %s (sticky, %v)", targetLog, candidateLogAddress(*candidate), err)
-			} else if shouldRetryStatus(resp.StatusCode) {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-				t.pool.MarkFailure(candidate.key, targetHost)
-				t.clearStickyProxy(targetHost)
-				logger.Printf("[RETRY] %s -> %s (sticky, %d)", targetLog, candidateLogAddress(*candidate), resp.StatusCode)
-			} else {
-				t.setStickyProxy(targetHost, candidate.key)
-				t.pool.MarkSuccess(candidate.key, targetHost)
-				logger.Printf("[OK] %s -> %s (sticky, %d)", targetLog, candidateLogAddress(*candidate), resp.StatusCode)
-				return resp, nil
-			}
-		} else {
-			t.clearStickyProxy(targetHost)
-		}
-	}
 
 	now := time.Now()
 	candidates := t.pool.Candidates(now, targetHost)
@@ -538,7 +487,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		t.setStickyProxy(targetHost, candidate.key)
 		logger.Printf("[OK] %s -> %s (%d)", targetLog, candidateLogAddress(candidate), resp.StatusCode)
 		return resp, nil
 	}
@@ -554,24 +502,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
-
-	if stickyKey, ok := t.getStickyProxy(targetHost); ok {
-		if candidate := t.pool.FindByKey(stickyKey); candidate != nil && candidate.dialContext != nil {
-			conn, err := candidate.dialContext(ctx, network, addr)
-			if err != nil {
-				t.pool.MarkFailure(candidate.key, targetHost)
-				t.clearStickyProxy(targetHost)
-				logger.Printf("[ERR] CONNECT %s -> %s (sticky, %v)", addr, candidateLogAddress(*candidate), err)
-			} else {
-				t.setStickyProxy(targetHost, candidate.key)
-				t.pool.MarkSuccess(candidate.key, targetHost)
-				logger.Printf("[OK] CONNECT %s -> %s (sticky)", addr, candidateLogAddress(*candidate))
-				return conn, nil
-			}
-		} else {
-			t.clearStickyProxy(targetHost)
-		}
-	}
 
 	now := time.Now()
 	candidates := t.pool.Candidates(now, targetHost)
@@ -595,7 +525,6 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 			}
 
 			t.pool.MarkSuccess(candidate.key, targetHost)
-			t.setStickyProxy(targetHost, candidate.key)
 			logger.Printf("[OK] CONNECT %s -> %s", addr, candidateLogAddress(candidate))
 			return conn, nil
 		}
@@ -676,37 +605,6 @@ func requestTargetLog(req *http.Request) string {
 	}
 
 	return strings.ToLower(host) + path
-}
-
-// ── Sticky proxy ──────────────────────────────────────────────────────
-
-func (t *RotatingProxyTransport) setStickyProxy(host, key string) {
-	t.stickyMu.Lock()
-	defer t.stickyMu.Unlock()
-	if t.stickyByHost == nil {
-		t.stickyByHost = make(map[string]stickyEntry)
-	}
-	t.stickyByHost[host] = stickyEntry{
-		key:    key,
-		expiry: time.Now().Add(stickyProxyDuration),
-	}
-}
-
-func (t *RotatingProxyTransport) getStickyProxy(host string) (string, bool) {
-	t.stickyMu.Lock()
-	defer t.stickyMu.Unlock()
-	entry, ok := t.stickyByHost[host]
-	if !ok || time.Now().After(entry.expiry) {
-		delete(t.stickyByHost, host)
-		return "", false
-	}
-	return entry.key, true
-}
-
-func (t *RotatingProxyTransport) clearStickyProxy(host string) {
-	t.stickyMu.Lock()
-	defer t.stickyMu.Unlock()
-	delete(t.stickyByHost, host)
 }
 
 // ── Transport helpers ─────────────────────────────────────────────────
