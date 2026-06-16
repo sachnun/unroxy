@@ -34,7 +34,6 @@ func TestNewCountryPoolRouterFetchesProxifly(t *testing.T) {
 
 	_ = proxies
 
-	// Verify at least parsing and fetch work (health check is tested separately)
 	if len(proxies) == 0 {
 		t.Fatal("expected at least some proxies to be parsed")
 	}

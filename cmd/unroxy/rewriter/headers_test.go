@@ -60,7 +60,6 @@ func TestRewriteHeaders_Link(t *testing.T) {
 	if link == "" {
 		t.Error("Link header should not be empty")
 	}
-	// Check that URLs are rewritten
 	if !containsAll(link, "/example.com/styles/main.css", "/example.com/scripts/app.js") {
 		t.Errorf("Expected Link URLs to be rewritten, got: %s", link)
 	}
@@ -80,7 +79,6 @@ func TestRewriteHeaders_SetCookie(t *testing.T) {
 		t.Errorf("Expected 2 cookies, got %d", len(cookies))
 	}
 
-	// Check that Path is rewritten
 	for _, cookie := range cookies {
 		if !containsAll(cookie, "/example.com") {
 			t.Errorf("Expected cookie Path to be rewritten, got: %s", cookie)

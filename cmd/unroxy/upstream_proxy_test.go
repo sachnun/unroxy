@@ -20,7 +20,6 @@ func TestProxyPoolCandidatesRandomOrder(t *testing.T) {
 		},
 	}
 
-	// Collect keys across multiple calls to ensure all proxies are present
 	seen := make(map[string]bool)
 	for i := 0; i < 10; i++ {
 		candidates := pool.Candidates(time.Now(), "")
@@ -81,7 +80,6 @@ func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 		t.Fatalf("expected 3 candidates, got %d", len(candidates))
 	}
 
-	// Ready proxies (verified, untested) should all come before the failed proxy
 	if candidates[2].key != "http://failed:80" {
 		t.Fatalf("expected failed proxy last, got order: %q, %q, %q",
 			candidates[0].key, candidates[1].key, candidates[2].key)
@@ -139,7 +137,6 @@ func TestProxyPoolReplaceSwapsProxies(t *testing.T) {
 		t.Fatalf("expected 2 candidates, got %d", len(candidates))
 	}
 
-	// Old failed entry should be pruned since "http://old:80" no longer in pool
 	if len(pool.failedByHost) != 0 {
 		t.Fatalf("expected failedByHost to be pruned, got %v", pool.failedByHost)
 	}

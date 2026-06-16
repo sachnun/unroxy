@@ -13,7 +13,6 @@ func TestToProxyURL(t *testing.T) {
 		input    string
 		expected string
 	}{
-		// Special schemes - should not be rewritten
 		{"data URI", "data:image/png;base64,abc", "data:image/png;base64,abc"},
 		{"javascript", "javascript:void(0)", "javascript:void(0)"},
 		{"mailto", "mailto:test@example.com", "mailto:test@example.com"},
@@ -22,28 +21,22 @@ func TestToProxyURL(t *testing.T) {
 		{"blob", "blob:http://example.com/123", "blob:http://example.com/123"},
 		{"empty", "", ""},
 
-		// Root-relative URLs
 		{"root relative", "/path/to/file", "/example.com/path/to/file"},
 		{"root relative with query", "/path?q=1", "/example.com/path?q=1"},
 		{"root only", "/", "/example.com/"},
 
-		// Protocol-relative URLs
 		{"protocol relative", "//cdn.example.com/file.js", "/cdn.example.com/file.js"},
 		{"protocol relative with path", "//other.com/path/file", "/other.com/path/file"},
 
-		// Absolute URLs - same domain
 		{"absolute same domain", "https://example.com/path", "/example.com/path"},
 		{"absolute same domain with query", "https://example.com/path?q=1", "/example.com/path?q=1"},
 
-		// Absolute URLs - different domain
 		{"absolute different domain", "https://other.com/path", "/other.com/path"},
 
-		// Relative URLs - should not be changed
 		{"relative", "path/to/file", "path/to/file"},
 		{"relative dot", "./path/to/file", "./path/to/file"},
 		{"relative parent", "../path/to/file", "../path/to/file"},
 
-		// Already proxied - should not double-proxy
 		{"already proxied", "/example.com/path", "/example.com/path"},
 	}
 
