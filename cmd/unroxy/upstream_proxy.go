@@ -500,7 +500,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		var resp *http.Response
 		var err error
-		proto := candidateProtoPrefix(candidate)
+
+		var ti *tunnelInfo
+		if isPsiphonCandidate(candidate) {
+			reqID := atomic.AddInt64(&reqCounter, 1)
+			attemptReq = attemptReq.WithContext(context.WithValue(attemptReq.Context(), reqIDKey{}, reqID))
+		}
+
 		if candidate.dialContext != nil {
 			v, _ := t.dialTransports.LoadOrStore(candidate.key, &http.Transport{
 				DialContext:           candidate.dialContext,
@@ -514,6 +520,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		} else {
 			resp, err = t.transport.RoundTrip(attemptReq)
 		}
+
+		if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
+			reqID, _ := attemptReq.Context().Value(reqIDKey{}).(int64)
+			ti = candidate.psiphon.PopTunnelInfo(reqID)
+		}
+
+		proto := candidateProtoPrefix(ti)
 		if err != nil {
 			if errors.Is(err, errPsiphonNotReady) {
 				continue
@@ -526,17 +539,17 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				if !isPsiphonCandidate(candidate) {
 					t.pool.MarkFailure(candidate.key, targetHost)
 				}
-				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 				lastErr = err
 				break
 			}
 			if isPsiphonCandidate(candidate) {
-				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 				lastErr = err
 				continue
 			}
 			t.pool.MarkFailure(candidate.key, targetHost)
-			logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
+			logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 			lastErr = err
 			continue
 		}
@@ -547,13 +560,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			if !isPsiphonCandidate(candidate) {
 				t.pool.MarkFailure(candidate.key, targetHost)
 			}
-			logger.Printf("[RETRY]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
+			logger.Printf("[RETRY]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
+		logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
 		return resp, nil
 	}
 
@@ -577,8 +590,21 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 				continue
 			}
 
-			proto := candidateProtoPrefix(candidate)
-			conn, err := candidate.dialContext(ctx, network, addr)
+			var ti *tunnelInfo
+			dialCtx := ctx
+			if isPsiphonCandidate(candidate) {
+				reqID := atomic.AddInt64(&reqCounter, 1)
+				dialCtx = context.WithValue(ctx, reqIDKey{}, reqID)
+			}
+
+			conn, err := candidate.dialContext(dialCtx, network, addr)
+
+			if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
+				reqID, _ := dialCtx.Value(reqIDKey{}).(int64)
+				ti = candidate.psiphon.PopTunnelInfo(reqID)
+			}
+
+			proto := candidateProtoPrefix(ti)
 			if err != nil {
 				if errors.Is(err, errPsiphonNotReady) {
 					continue
@@ -590,20 +616,20 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 					if !isPsiphonCandidate(candidate) {
 						t.pool.MarkFailure(candidate.key, targetHost)
 					}
-					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
+					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 					break
 				}
 				if isPsiphonCandidate(candidate) {
-					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
+					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 					continue
 				}
 				t.pool.MarkFailure(candidate.key, targetHost)
-				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 				continue
 			}
 
 			t.pool.MarkSuccess(candidate.key, targetHost)
-			logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate))
+			logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate, ti))
 			return conn, nil
 		}
 	}
@@ -620,10 +646,10 @@ func extractHost(addr string) string {
 	return strings.ToLower(host)
 }
 
-func candidateLogAddress(c proxyCandidate) string {
+func candidateLogAddress(c proxyCandidate, ti *tunnelInfo) string {
 	if isPsiphonCandidate(c) && c.psiphon != nil {
-		if ip, region, _ := c.psiphon.LastTunnel(); ip != "" {
-			return fmt.Sprintf("%s (%s)", ip, region)
+		if ti != nil && ti.ip != "" {
+			return fmt.Sprintf("%s (%s)", ti.ip, ti.region)
 		}
 		return "tunnel"
 	}
@@ -640,17 +666,15 @@ func candidateLogAddress(c proxyCandidate) string {
 	return host
 }
 
-func candidateProtoPrefix(c proxyCandidate) string {
-	if c.psiphon != nil {
-		if _, _, proto := c.psiphon.LastTunnel(); proto != "" {
-			return "[" + proto + "]"
-		}
+func candidateProtoPrefix(ti *tunnelInfo) string {
+	if ti != nil && ti.protocol != "" {
+		return "[" + ti.protocol + "]"
 	}
 	return ""
 }
 
-func logPrefix(tag string, c proxyCandidate) string {
-	proto := candidateProtoPrefix(c)
+func logPrefix(tag string, ti *tunnelInfo) string {
+	proto := candidateProtoPrefix(ti)
 	if proto != "" {
 		return tag + proto + " "
 	}

@@ -48,15 +48,16 @@ type PsiphonDialer struct {
 	targetPool  int
 
 	serverEntries map[string]serverEntryInfo
-	lastTunnel    atomic.Pointer[tunnelInfo]
+	tunnelByReq   sync.Map // int64 -> *tunnelInfo
+	ipProtocols   sync.Map // IP string -> protocol string
 }
 
-func (d *PsiphonDialer) LastTunnel() (ip, region, proto string) {
-	ti := d.lastTunnel.Load()
-	if ti == nil {
-		return "", "", ""
+func (d *PsiphonDialer) PopTunnelInfo(reqID int64) *tunnelInfo {
+	v, ok := d.tunnelByReq.LoadAndDelete(reqID)
+	if !ok {
+		return nil
 	}
-	return ti.ip, ti.region, ti.protocol
+	return v.(*tunnelInfo)
 }
 
 func formatRegionSummary(regionCount map[string]int) string {
@@ -152,6 +153,9 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 
 		if msg.Type == "ConnectedServer" {
 			if entry, ok := d.serverEntries[msg.Data.DiagnosticID]; ok {
+				if msg.Data.Protocol != "" {
+					d.ipProtocols.Store(entry.ip, msg.Data.Protocol)
+				}
 				logger.Printf("Psiphon: tunnel connected - %s (%s) [%s]", entry.ip, entry.region, msg.Data.Protocol)
 			}
 		}
@@ -217,10 +221,15 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 	return d, nil
 }
 
+type reqIDKey struct{}
+
+var reqCounter int64
+
 func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d.tunnelReady.Load() == 0 {
 		return nil, errPsiphonNotReady
 	}
+	reqID, _ := ctx.Value(reqIDKey{}).(int64)
 	var lastErr error
 	for i := 0; i < psiphonRetryCount; i++ {
 		if ctx.Err() != nil {
@@ -231,7 +240,11 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 			if host, _, splitErr := net.SplitHostPort(conn.RemoteAddr().String()); splitErr == nil {
 				for _, e := range d.serverEntries {
 					if e.ip == host {
-						d.lastTunnel.Store(&tunnelInfo{ip: e.ip, region: e.region})
+						proto, _ := d.ipProtocols.Load(host)
+						protoStr, _ := proto.(string)
+						if reqID != 0 {
+							d.tunnelByReq.Store(reqID, &tunnelInfo{ip: e.ip, region: e.region, protocol: protoStr})
+						}
 						break
 					}
 				}
