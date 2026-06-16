@@ -273,7 +273,7 @@ func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int) map[s
 		maxTunnels = poolSize
 	}
 
-	sshWindowSize := 1
+	sshWindowSize := 32
 	pc := map[string]interface{}{
 		"LocalSocksProxyPort":            0,
 		"LocalHttpProxyPort":             0,
@@ -289,8 +289,8 @@ func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int) map[s
 		"NetworkID":                      envOrDefault("PSIPHON_NETWORK_ID", "WIFI"),
 		"EmitDiagnosticNotices":          true,
 		"DisableTactics":                 true,
-		"LimitMeekBufferSizes":           true,
-		"LimitRelayBufferSizes":          true,
+		"LimitMeekBufferSizes":           false,
+		"LimitRelayBufferSizes":          false,
 		"LimitCPUThreads":                true,
 		"ConnectionWorkerPoolMaxSize":    4,
 		"SSHChannelWindowSize":           &sshWindowSize,
