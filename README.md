@@ -1,6 +1,6 @@
 # Unroxy
 
-Universal rotating proxy.
+Proxy server with URL rewriting.
 
 ## Usage
 
