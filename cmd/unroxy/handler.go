@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"log"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
@@ -74,6 +76,11 @@ func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request
 	poolName, domain, path, query := h.parsePoolRequest(r)
 	if domain == "" {
 		http.Error(w, "Invalid path. Usage: /domain.com/path", http.StatusBadRequest)
+		return
+	}
+
+	if !h.isResolvable(domain) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -227,6 +234,13 @@ func isValidDomain(s string) bool {
 	}
 	_, isICANN := publicsuffix.PublicSuffix(ascii)
 	return isICANN
+}
+
+func (h *ProxyHandler) isResolvable(domain string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := net.DefaultResolver.LookupHost(ctx, domain)
+	return err == nil
 }
 
 func (h *ProxyHandler) createProxy(domain, path, query string, transport http.RoundTripper) *httputil.ReverseProxy {
