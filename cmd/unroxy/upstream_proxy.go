@@ -62,6 +62,7 @@ type proxyState struct {
 	latency     time.Duration
 	healthy     bool
 	lastChecked time.Time
+	priority    int
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
@@ -70,6 +71,7 @@ type proxyCandidate struct {
 	url         *url.URL
 	country     string
 	latency     time.Duration
+	priority    int
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
@@ -91,8 +93,6 @@ func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
 		proxies: cloneProxyStates(proxies),
 	}
 }
-
-// ── Proxifly ──────────────────────────────────────────────────────────
 
 type proxiflyProvider struct{}
 
@@ -250,7 +250,6 @@ func groupProxiesByCountry(proxies []*proxyState) map[string][]*proxyState {
 	return groups
 }
 
-// NewProxiflyCountryPools fetches proxies from all sources, tests, groups by country.
 func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*proxyState, error) {
 	proxies, err := fetchProxiflyProxies()
 	if err != nil {
@@ -313,8 +312,6 @@ func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*Proxy
 	}()
 }
 
-// ── Health check ──────────────────────────────────────────────────────
-
 func testProxiesConcurrently(proxies []*proxyState, concurrency int, logger *log.Logger) []*proxyState {
 	if len(proxies) == 0 {
 		return nil
@@ -369,8 +366,6 @@ func testProxyReachable(p *proxyState) bool {
 	return true
 }
 
-// ── Pool rotation ─────────────────────────────────────────────────────
-
 func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidate {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -395,6 +390,7 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			url:         cloneURL(state.url),
 			country:     state.country,
 			latency:     state.latency,
+			priority:    state.priority,
 			dialContext: state.dialContext,
 		}
 
@@ -405,8 +401,18 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 		}
 	}
 
-	sort.SliceStable(ready, func(i, j int) bool { return ready[i].latency < ready[j].latency })
-	sort.SliceStable(failed, func(i, j int) bool { return failed[i].latency < failed[j].latency })
+	sort.SliceStable(ready, func(i, j int) bool {
+		if ready[i].priority != ready[j].priority {
+			return ready[i].priority < ready[j].priority
+		}
+		return ready[i].latency < ready[j].latency
+	})
+	sort.SliceStable(failed, func(i, j int) bool {
+		if failed[i].priority != failed[j].priority {
+			return failed[i].priority < failed[j].priority
+		}
+		return failed[i].latency < failed[j].latency
+	})
 
 	ordered := make([]proxyCandidate, 0, len(p.proxies))
 	ordered = append(ordered, ready...)
@@ -469,7 +475,14 @@ func (p *ProxyPool) Replace(proxies []*proxyState) {
 	p.failedByHost = nil
 }
 
-// ── Rotating proxy transport ──────────────────────────────────────────
+func (p *ProxyPool) SetPrimary(primary *proxyState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cp := *primary
+	cp.priority = 0
+	p.proxies = append([]*proxyState{&cp}, p.proxies...)
+}
 
 type RotatingProxyTransport struct {
 	logger    *log.Logger
@@ -552,7 +565,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	return nil, lastErr
 }
 
-// DialContext dials a raw TCP connection through the upstream SOCKS proxy pool.
 func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
@@ -584,7 +596,6 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 		}
 	}
 
-	// Fallback to direct connection
 	logger.Printf("[DIRECT] CONNECT %s (no proxy)", addr)
 	return (&net.Dialer{Timeout: proxyDialTimeout}).DialContext(ctx, network, addr)
 }
@@ -596,8 +607,6 @@ func extractHost(addr string) string {
 	}
 	return strings.ToLower(host)
 }
-
-// ── Logging helpers ───────────────────────────────────────────────────
 
 func candidateLogAddress(c proxyCandidate) string {
 	host := c.url.Hostname()
@@ -660,8 +669,6 @@ func requestTargetLog(req *http.Request) string {
 
 	return strings.ToLower(host) + path
 }
-
-// ── Transport helpers ─────────────────────────────────────────────────
 
 type proxyContextKey struct{}
 

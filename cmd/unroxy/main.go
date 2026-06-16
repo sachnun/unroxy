@@ -29,17 +29,26 @@ func main() {
 }
 
 func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
+	psiphonDialer, psiphonErr := NewPsiphonDialer(logger)
+	if psiphonErr != nil {
+		logger.Printf("Psiphon init failed: %v (fallback to Proxifly only)", psiphonErr)
+	}
+
 	countryPools, allProxies, err := NewProxiflyCountryPools(logger)
 	if err != nil {
 		logger.Printf("Proxifly proxy not ready: %v", err)
 		return NewPoolRouter(nil, nil)
 	}
 
-	// Default pool with ALL proxies (backward compat, no auth)
+	for _, p := range allProxies {
+		p.priority = 1
+	}
+
+	logger.Printf("Proxifly: %d proxies", len(allProxies))
+
 	defaultPool := NewProxyPool(logger, allProxies)
 	defaultTransport := NewRotatingProxyTransport(defaultPool)
 
-	// Named pools per country
 	named := make([]*NamedPool, 0, len(countryPools))
 	for country, pool := range countryPools {
 		transport := NewRotatingProxyTransport(pool)
@@ -52,9 +61,21 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 		logger.Printf("Pool %q ready: %d proxies", country, pool.Count())
 	}
 
+	if psiphonDialer != nil {
+		psiphonState := &proxyState{
+			key:         "psiphon://tunnel",
+			dialContext: psiphonDialer.DialContext,
+			country:     "PS",
+		}
+		defaultPool.SetPrimary(psiphonState)
+		for _, pool := range countryPools {
+			pool.SetPrimary(psiphonState)
+		}
+		logger.Printf("Psiphon primary proxy injected into all pools")
+	}
+
 	logger.Printf("Total: %d proxies across %d countries", len(allProxies), len(countryPools))
 
-	// Start refresh for all pools
 	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, logger)
 
 	return NewPoolRouter(named, defaultTransport)
