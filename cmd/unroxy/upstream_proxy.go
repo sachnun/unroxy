@@ -268,12 +268,21 @@ func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*prox
 	return pools, proxies, nil
 }
 
-func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*ProxyPool, defaultPool *ProxyPool, logger *log.Logger) {
+func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*ProxyPool, defaultPool *ProxyPool, psiphonState *proxyState, logger *log.Logger) {
 	go func() {
 		ticker := time.NewTicker(providerRefreshEvery)
 		defer ticker.Stop()
 
 		lastETags := make(map[string]string)
+		for _, provider := range providers {
+			etag, err := provider.ETag()
+			if err != nil {
+				logger.Printf("%s initial ETag failed: %v", provider.Name(), err)
+				continue
+			}
+			lastETags[provider.Name()] = etag
+		}
+
 		for range ticker.C {
 			for _, provider := range providers {
 				name := provider.Name()
@@ -298,10 +307,16 @@ func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*Proxy
 				groups := groupProxiesByCountry(proxies)
 
 				defaultPool.Replace(proxies)
+				if psiphonState != nil {
+					defaultPool.SetPrimary(psiphonState)
+				}
 
 				for country, states := range groups {
 					if pool, ok := countryPools[country]; ok {
 						pool.Replace(states)
+						if psiphonState != nil {
+							pool.SetPrimary(psiphonState)
+						}
 					}
 				}
 

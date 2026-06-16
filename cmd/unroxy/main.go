@@ -61,8 +61,9 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 		})
 	}
 
+	var psiphonState *proxyState
 	if psiphonDialer != nil {
-		psiphonState := &proxyState{
+		psiphonState = &proxyState{
 			key:         "psiphon://tunnel",
 			url:         &url.URL{Scheme: "psiphon", Host: "tunnel"},
 			dialContext: psiphonDialer.DialContext,
@@ -77,7 +78,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 
 	logger.Printf("Total: %d proxies across %d countries", len(allProxies), len(countryPools))
 
-	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, logger)
+	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, psiphonState, logger)
 
 	return NewPoolRouter(named, defaultTransport)
 }
