@@ -68,6 +68,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 			url:         &url.URL{Scheme: "psiphon", Host: "tunnel"},
 			dialContext: psiphonDialer.DialContext,
 			country:     "PS",
+			psiphon:     psiphonDialer,
 		}
 		defaultPool.SetPrimary(psiphonState)
 		for _, pool := range countryPools {

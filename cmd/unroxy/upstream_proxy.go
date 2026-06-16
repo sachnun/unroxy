@@ -526,17 +526,17 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				if !isPsiphonCandidate(candidate) {
 					t.pool.MarkFailure(candidate.key, targetHost)
 				}
-				logger.Printf("[ERR] %s%s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
 				lastErr = err
 				break
 			}
 			if isPsiphonCandidate(candidate) {
-				logger.Printf("[ERR] %s%s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
 				lastErr = err
 				continue
 			}
 			t.pool.MarkFailure(candidate.key, targetHost)
-			logger.Printf("[ERR] %s%s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
+			logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
 			lastErr = err
 			continue
 		}
@@ -547,13 +547,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			if !isPsiphonCandidate(candidate) {
 				t.pool.MarkFailure(candidate.key, targetHost)
 			}
-			logger.Printf("[RETRY] %s%s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
+			logger.Printf("[RETRY]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("[OK] %s%s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
+		logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
 		return resp, nil
 	}
 
@@ -590,20 +590,20 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 					if !isPsiphonCandidate(candidate) {
 						t.pool.MarkFailure(candidate.key, targetHost)
 					}
-					logger.Printf("[ERR] %sCONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
+					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
 					break
 				}
 				if isPsiphonCandidate(candidate) {
-					logger.Printf("[ERR] %sCONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
+					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
 					continue
 				}
 				t.pool.MarkFailure(candidate.key, targetHost)
-				logger.Printf("[ERR] %sCONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
 				continue
 			}
 
 			t.pool.MarkSuccess(candidate.key, targetHost)
-			logger.Printf("[OK] %sCONNECT %s -> %s", proto, addr, candidateLogAddress(candidate))
+			logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate))
 			return conn, nil
 		}
 	}
