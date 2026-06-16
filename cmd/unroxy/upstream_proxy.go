@@ -485,9 +485,10 @@ func (p *ProxyPool) SetPrimary(primary *proxyState) {
 }
 
 type RotatingProxyTransport struct {
-	logger    *log.Logger
-	pool      *ProxyPool
-	transport http.RoundTripper
+	logger         *log.Logger
+	pool           *ProxyPool
+	transport      http.RoundTripper
+	dialTransports sync.Map
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -533,14 +534,15 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		var resp *http.Response
 		var err error
 		if candidate.dialContext != nil {
-			rt := &http.Transport{
+			v, _ := t.dialTransports.LoadOrStore(candidate.key, &http.Transport{
 				DialContext:           candidate.dialContext,
-				DisableKeepAlives:     true,
 				ForceAttemptHTTP2:     false,
+				MaxIdleConns:          10,
+				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ResponseHeaderTimeout: proxyHeaderTimeout,
-			}
-			resp, err = rt.RoundTrip(attemptReq)
+			})
+			resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 		} else {
 			resp, err = t.transport.RoundTrip(attemptReq)
 		}
