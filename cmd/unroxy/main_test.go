@@ -8,41 +8,34 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/proxy"
 )
 
 func TestNewCountryPoolRouterFetchesProxifly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "socks4") {
-			w.Write([]byte(`[]`))
-			return
-		}
-		w.Write([]byte(`[
-			{"proxy":"socks5://1.2.3.4:1080","protocol":"socks5","ip":"1.2.3.4","port":1080,"https":false,"anonymity":"transparent","score":1,"geolocation":{"country":"US","city":"Ashburn"}},
-			{"proxy":"socks5://5.6.7.8:1080","protocol":"socks5","ip":"5.6.7.8","port":1080,"https":false,"anonymity":"elite","score":1,"geolocation":{"country":"DE","city":"Berlin"}}
-		]`))
+		w.Write([]byte("socks5://1.2.3.4:1080,US,Ashburn\nsocks5://5.6.7.8:1080,DE,Berlin\n"))
 	}))
 	defer server.Close()
 
-	oldBaseURL := proxiflyBaseURL
-	proxiflyBaseURL = server.URL + "/"
-	defer func() { proxiflyBaseURL = oldBaseURL }()
+	oldURL := proxiflyCSVURL
+	proxiflyCSVURL = server.URL
+	defer func() { proxiflyCSVURL = oldURL }()
 
 	proxies, err := fetchProxiflyProxies()
 	if err != nil {
 		t.Fatalf("fetchProxiflyProxies failed: %v", err)
 	}
 
-	_ = proxies
-
-	if len(proxies) == 0 {
-		t.Fatal("expected at least some proxies to be parsed")
+	if len(proxies) != 2 {
+		t.Fatalf("expected 2 proxies, got %d", len(proxies))
 	}
 }
 
 func TestNewCountryPoolRouterLogsProxiflyNotReady(t *testing.T) {
-	oldBaseURL := proxiflyBaseURL
-	proxiflyBaseURL = "http://127.0.0.1:1/nonexistent/"
-	defer func() { proxiflyBaseURL = oldBaseURL }()
+	oldURL := proxiflyCSVURL
+	proxiflyCSVURL = "http://127.0.0.1:1/nonexistent/"
+	defer func() { proxiflyCSVURL = oldURL }()
 
 	var logs bytes.Buffer
 	logger := log.New(&logs, "", 0)
@@ -57,17 +50,20 @@ func TestNewCountryPoolRouterLogsProxiflyNotReady(t *testing.T) {
 	}
 }
 
-func TestProxiflyToProxyStatesBuildsSocks5Proxies(t *testing.T) {
-	proxies := proxiflyToProxyStates([]proxiflyProxy{
-		{Proxy: "socks5://1.2.3.4:1080", Protocol: "socks5", IP: "1.2.3.4", Port: 1080, GeoLocation: struct {
-			Country string `json:"country"`
-			City    string `json:"city"`
-		}{Country: "US"}},
-		{Proxy: "socks4://5.6.7.8:4145", Protocol: "socks4", IP: "5.6.7.8", Port: 4145, GeoLocation: struct {
-			Country string `json:"country"`
-			City    string `json:"city"`
-		}{Country: "DE"}},
-	})
+func TestFetchProxiflyProxiesParsesCSV(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("socks5://1.2.3.4:1080,US,Ashburn\nsocks4://5.6.7.8:4145,DE,Berlin\n"))
+	}))
+	defer server.Close()
+
+	oldURL := proxiflyCSVURL
+	proxiflyCSVURL = server.URL
+	defer func() { proxiflyCSVURL = oldURL }()
+
+	proxies, err := fetchProxiflyProxies()
+	if err != nil {
+		t.Fatalf("fetchProxiflyProxies failed: %v", err)
+	}
 
 	if len(proxies) != 2 {
 		t.Fatalf("expected 2 proxy states, got %d", len(proxies))
@@ -100,10 +96,20 @@ func TestProxiflyToProxyStatesBuildsSocks5Proxies(t *testing.T) {
 	}
 }
 
-func TestProxiflyToProxyStatesHandlesEmptyCountry(t *testing.T) {
-	proxies := proxiflyToProxyStates([]proxiflyProxy{
-		{Proxy: "socks5://1.2.3.4:1080", Protocol: "socks5", IP: "1.2.3.4", Port: 1080},
-	})
+func TestFetchProxiflyProxiesHandlesEmptyCountry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("socks5://1.2.3.4:1080,,\n"))
+	}))
+	defer server.Close()
+
+	oldURL := proxiflyCSVURL
+	proxiflyCSVURL = server.URL
+	defer func() { proxiflyCSVURL = oldURL }()
+
+	proxies, err := fetchProxiflyProxies()
+	if err != nil {
+		t.Fatalf("fetchProxiflyProxies failed: %v", err)
+	}
 
 	if len(proxies) != 1 {
 		t.Fatalf("expected 1 proxy state, got %d", len(proxies))
@@ -115,11 +121,18 @@ func TestProxiflyToProxyStatesHandlesEmptyCountry(t *testing.T) {
 }
 
 func TestTestProxyReachableRefused(t *testing.T) {
-	proxies := proxiflyToProxyStates([]proxiflyProxy{
-		{Proxy: "socks5://127.0.0.1:1", Protocol: "socks5", IP: "127.0.0.1", Port: 1},
-	})
+	p := &proxyState{
+		key: "socks5://127.0.0.1:1",
+		url: &url.URL{Scheme: "socks5", Host: "127.0.0.1:1"},
+	}
+	d, err := proxy.FromURL(p.url, proxy.Direct)
+	if err == nil {
+		if d2, ok := d.(proxy.ContextDialer); ok {
+			p.dialContext = d2.DialContext
+		}
+	}
 
-	if testProxyReachable(proxies[0]) {
+	if testProxyReachable(p) {
 		t.Fatal("expected proxy to be unreachable")
 	}
 }
@@ -130,5 +143,3 @@ func TestTestProxyReachableNilDial(t *testing.T) {
 		t.Fatal("expected proxy with nil dialContext to be unreachable")
 	}
 }
-
-

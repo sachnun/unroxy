@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -37,62 +37,9 @@ type ProxyProvider interface {
 }
 
 var (
-	proxiflyBaseURL    = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/"
+	proxiflyCSVURL     = "https://raw.githubusercontent.com/proxifly/free-proxy-list/refs/heads/main/proxies/all/data.csv"
 	errNoUpstreamProxy = errors.New("no upstream proxies available")
 )
-
-type proxiflyProxy struct {
-	Proxy       string `json:"proxy"`
-	Protocol    string `json:"protocol"`
-	IP          string `json:"ip"`
-	Port        int    `json:"port"`
-	HTTPS       bool   `json:"https"`
-	Anonymity   string `json:"anonymity"`
-	Score       int    `json:"score"`
-	GeoLocation struct {
-		Country string `json:"country"`
-		City    string `json:"city"`
-	} `json:"geolocation"`
-}
-
-type proxyState struct {
-	key         string
-	url         *url.URL
-	country     string
-	latency     time.Duration
-	healthy     bool
-	lastChecked time.Time
-	priority    int
-	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-}
-
-type proxyCandidate struct {
-	key         string
-	url         *url.URL
-	country     string
-	latency     time.Duration
-	priority    int
-	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-}
-
-type ProxyPool struct {
-	logger *log.Logger
-
-	mu           sync.RWMutex
-	proxies      []*proxyState
-	failedByHost map[string]map[string]bool
-}
-
-func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
-	if logger == nil {
-		logger = log.Default()
-	}
-
-	return &ProxyPool{
-		logger:  logger,
-		proxies: cloneProxyStates(proxies),
-	}
-}
 
 type proxiflyProvider struct{}
 
@@ -100,27 +47,20 @@ func (p *proxiflyProvider) Name() string { return "Proxifly" }
 
 func (p *proxiflyProvider) ETag() (string, error) {
 	client := &http.Client{Timeout: providerFetchTimeout}
-	var etags []string
-	for _, path := range []string{
-		"protocols/socks5/data.json",
-		"protocols/socks4/data.json",
-	} {
-		req, err := http.NewRequest(http.MethodHead, proxiflyBaseURL+path, nil)
-		if err != nil {
-			return "", err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", err
-		}
-		resp.Body.Close()
-		et := resp.Header.Get("ETag")
-		if et == "" {
-			return "", fmt.Errorf("no ETag for %s", path)
-		}
-		etags = append(etags, et)
+	req, err := http.NewRequest(http.MethodHead, proxiflyCSVURL, nil)
+	if err != nil {
+		return "", err
 	}
-	return strings.Join(etags, "|"), nil
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	et := resp.Header.Get("ETag")
+	if et == "" {
+		return "", fmt.Errorf("no ETag for proxifly CSV")
+	}
+	return et, nil
 }
 
 func (p *proxiflyProvider) Fetch() ([]*proxyState, error) {
@@ -130,30 +70,7 @@ func (p *proxiflyProvider) Fetch() ([]*proxyState, error) {
 func fetchProxiflyProxies() ([]*proxyState, error) {
 	client := &http.Client{Timeout: providerFetchTimeout}
 
-	all := make([]*proxyState, 0)
-
-	for _, path := range []string{
-		"protocols/socks5/data.json",
-		"protocols/socks4/data.json",
-	} {
-		states, err := fetchProxiflyType(client, path)
-		if err != nil {
-			continue
-		}
-		all = append(all, states...)
-	}
-
-	if len(all) == 0 {
-		return nil, errors.New("no proxifly proxies fetched")
-	}
-
-	return all, nil
-}
-
-func fetchProxiflyType(client *http.Client, path string) ([]*proxyState, error) {
-	url := proxiflyBaseURL + path
-
-	resp, err := client.Get(url)
+	resp, err := client.Get(proxiflyCSVURL)
 	if err != nil {
 		return nil, err
 	}
@@ -161,46 +78,35 @@ func fetchProxiflyType(client *http.Client, path string) ([]*proxyState, error) 
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("proxifly CDN returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("proxifly CSV returned status %d", resp.StatusCode)
 	}
 
-	var proxies []proxiflyProxy
-	if err := json.NewDecoder(resp.Body).Decode(&proxies); err != nil {
-		return nil, err
+	reader := csv.NewReader(resp.Body)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read proxifly CSV: %w", err)
 	}
 
-	return proxiflyToProxyStates(proxies), nil
-}
-
-func proxiflyToProxyStates(proxies []proxiflyProxy) []*proxyState {
-	states := make([]*proxyState, 0, len(proxies))
-
-	for _, p := range proxies {
-		scheme := p.Protocol
-		if scheme == "" {
-			scheme = "socks5"
+	states := make([]*proxyState, 0, len(records))
+	for _, row := range records {
+		if len(row) < 2 {
+			continue
 		}
-
-		rawURL := scheme + "://" + net.JoinHostPort(p.IP, fmt.Sprint(p.Port))
+		rawURL := strings.TrimSpace(row[0])
+		country := strings.ToUpper(strings.TrimSpace(row[1]))
+		if country == "" {
+			country = "XX"
+		}
 
 		parsedURL, err := url.Parse(rawURL)
 		if err != nil {
 			continue
 		}
 
-		country := strings.ToUpper(strings.TrimSpace(p.GeoLocation.Country))
-		if country == "" {
-			country = "XX"
-		}
-
 		state := &proxyState{
 			key:     rawURL,
 			url:     parsedURL,
 			country: country,
-		}
-
-		if p.Proxy != "" && strings.HasPrefix(p.Proxy, scheme+"://") {
-			state.key = p.Proxy
 		}
 
 		switch parsedURL.Scheme {
@@ -235,7 +141,52 @@ func proxiflyToProxyStates(proxies []proxiflyProxy) []*proxyState {
 		}
 	}
 
-	return states
+	if len(states) == 0 {
+		return nil, errors.New("no proxifly proxies fetched")
+	}
+
+	return states, nil
+}
+
+type proxyState struct {
+	key         string
+	url         *url.URL
+	country     string
+	latency     time.Duration
+	healthy     bool
+	lastChecked time.Time
+	priority    int
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	psiphon     *PsiphonDialer
+}
+
+type proxyCandidate struct {
+	key         string
+	url         *url.URL
+	country     string
+	latency     time.Duration
+	priority    int
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	psiphon     *PsiphonDialer
+}
+
+type ProxyPool struct {
+	logger *log.Logger
+
+	mu           sync.RWMutex
+	proxies      []*proxyState
+	failedByHost map[string]map[string]bool
+}
+
+func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	return &ProxyPool{
+		logger:  logger,
+		proxies: cloneProxyStates(proxies),
+	}
 }
 
 func groupProxiesByCountry(proxies []*proxyState) map[string][]*proxyState {
@@ -407,6 +358,7 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			latency:     state.latency,
 			priority:    state.priority,
 			dialContext: state.dialContext,
+			psiphon:     state.psiphon,
 		}
 
 		if failedKeys[state.key] {
@@ -548,6 +500,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
 		var resp *http.Response
 		var err error
+		proto := candidateProtoPrefix(candidate)
 		if candidate.dialContext != nil {
 			v, _ := t.dialTransports.LoadOrStore(candidate.key, &http.Transport{
 				DialContext:           candidate.dialContext,
@@ -573,17 +526,17 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				if !isPsiphonCandidate(candidate) {
 					t.pool.MarkFailure(candidate.key, targetHost)
 				}
-				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR] %s%s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
 				lastErr = err
 				break
 			}
 			if isPsiphonCandidate(candidate) {
-				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR] %s%s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
 				lastErr = err
 				continue
 			}
 			t.pool.MarkFailure(candidate.key, targetHost)
-			logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
+			logger.Printf("[ERR] %s%s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate), err)
 			lastErr = err
 			continue
 		}
@@ -594,13 +547,13 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			if !isPsiphonCandidate(candidate) {
 				t.pool.MarkFailure(candidate.key, targetHost)
 			}
-			logger.Printf("[RETRY] %s -> %s (%d)", targetLog, candidateLogAddress(candidate), resp.StatusCode)
+			logger.Printf("[RETRY] %s%s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
 		}
 
 		t.pool.MarkSuccess(candidate.key, targetHost)
-		logger.Printf("[OK] %s -> %s (%d)", targetLog, candidateLogAddress(candidate), resp.StatusCode)
+		logger.Printf("[OK] %s%s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate), resp.StatusCode)
 		return resp, nil
 	}
 
@@ -624,6 +577,7 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 				continue
 			}
 
+			proto := candidateProtoPrefix(candidate)
 			conn, err := candidate.dialContext(ctx, network, addr)
 			if err != nil {
 				if errors.Is(err, errPsiphonNotReady) {
@@ -636,20 +590,20 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 					if !isPsiphonCandidate(candidate) {
 						t.pool.MarkFailure(candidate.key, targetHost)
 					}
-					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
+					logger.Printf("[ERR] %sCONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
 					break
 				}
 				if isPsiphonCandidate(candidate) {
-					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
+					logger.Printf("[ERR] %sCONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
 					continue
 				}
 				t.pool.MarkFailure(candidate.key, targetHost)
-				logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
+				logger.Printf("[ERR] %sCONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate), err)
 				continue
 			}
 
 			t.pool.MarkSuccess(candidate.key, targetHost)
-			logger.Printf("[OK] CONNECT %s -> %s", addr, candidateLogAddress(candidate))
+			logger.Printf("[OK] %sCONNECT %s -> %s", proto, addr, candidateLogAddress(candidate))
 			return conn, nil
 		}
 	}
@@ -667,6 +621,13 @@ func extractHost(addr string) string {
 }
 
 func candidateLogAddress(c proxyCandidate) string {
+	if isPsiphonCandidate(c) && c.psiphon != nil {
+		if ip, region, _ := c.psiphon.LastTunnel(); ip != "" {
+			return fmt.Sprintf("%s (%s)", ip, region)
+		}
+		return "tunnel"
+	}
+
 	host := c.url.Hostname()
 	if host == "" {
 		host = c.url.Host
@@ -677,6 +638,23 @@ func candidateLogAddress(c proxyCandidate) string {
 	}
 
 	return host
+}
+
+func candidateProtoPrefix(c proxyCandidate) string {
+	if c.psiphon != nil {
+		if _, _, proto := c.psiphon.LastTunnel(); proto != "" {
+			return "[" + proto + "]"
+		}
+	}
+	return ""
+}
+
+func logPrefix(tag string, c proxyCandidate) string {
+	proto := candidateProtoPrefix(c)
+	if proto != "" {
+		return tag + proto + " "
+	}
+	return tag + " "
 }
 
 func (t *RotatingProxyTransport) transportLogger() *log.Logger {
