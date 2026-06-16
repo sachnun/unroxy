@@ -4,11 +4,13 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
 )
@@ -16,12 +18,15 @@ import (
 //go:embed server_entries.txt
 var embeddedServerList string
 
+var errPsiphonNotReady = errors.New("psiphon not ready")
+
 type PsiphonDialer struct {
-	controller *psiphon.Controller
-	ctx        context.Context
-	cancel     context.CancelFunc
-	once       sync.Once
-	ready      chan struct{}
+	controller  *psiphon.Controller
+	ctx         context.Context
+	cancel      context.CancelFunc
+	once        sync.Once
+	tunnelReady atomic.Int32
+	targetPool  int
 }
 
 func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
@@ -35,6 +40,27 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 	poolSize := envInt("PSIPHON_POOL_SIZE", 32)
 	minIdle := envInt("PSIPHON_MIN_IDLE", 28)
 	maxTunnels := envInt("PSIPHON_MAX_TUNNELS", 64)
+
+	d := &PsiphonDialer{
+		targetPool: poolSize,
+	}
+
+	psiphon.SetNoticeWriter(psiphon.NewNoticeReceiver(func(notice []byte) {
+		var msg struct {
+			Type string `json:"noticeType"`
+		}
+		if json.Unmarshal(notice, &msg) != nil {
+			return
+		}
+		if msg.Type == "ActiveTunnel" {
+			n := d.tunnelReady.Add(1)
+			if int(n) == poolSize {
+				logger.Printf("Psiphon: all %d tunnels established", poolSize)
+			} else if n%10 == 0 {
+				logger.Printf("Psiphon: %d/%d tunnels established", n, poolSize)
+			}
+		}
+	}))
 
 	pc := buildPsiphonConfig(dataDir, poolSize, minIdle, maxTunnels)
 	configJSON, _ := json.Marshal(pc)
@@ -53,6 +79,8 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+	d.cancel = cancel
 
 	if embeddedServerList != "" {
 		if err := psiphon.ImportEmbeddedServerEntries(ctx, config, "", embeddedServerList); err != nil {
@@ -65,25 +93,18 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 		cancel()
 		return nil, err
 	}
+	d.controller = controller
 
-	d := &PsiphonDialer{
-		controller: controller,
-		ctx:        ctx,
-		cancel:     cancel,
-		ready:      make(chan struct{}),
-	}
-
-	go func() {
-		controller.Run(ctx)
-	}()
-	close(d.ready)
+	go controller.Run(ctx)
 
 	logger.Printf("Psiphon tunnel starting (pool=%d, min_idle=%d, max=%d)", poolSize, minIdle, maxTunnels)
 	return d, nil
 }
 
 func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	<-d.ready
+	if d.tunnelReady.Load() == 0 {
+		return nil, errPsiphonNotReady
+	}
 	return d.controller.Dial(addr, nil)
 }
 

@@ -530,8 +530,24 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	var lastErr error
 	for _, candidate := range candidates {
 		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
-		resp, err := t.transport.RoundTrip(attemptReq)
+		var resp *http.Response
+		var err error
+		if candidate.dialContext != nil {
+			rt := &http.Transport{
+				DialContext:           candidate.dialContext,
+				DisableKeepAlives:     true,
+				ForceAttemptHTTP2:     false,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: proxyHeaderTimeout,
+			}
+			resp, err = rt.RoundTrip(attemptReq)
+		} else {
+			resp, err = t.transport.RoundTrip(attemptReq)
+		}
 		if err != nil {
+			if errors.Is(err, errPsiphonNotReady) {
+				continue
+			}
 			if isHostUnreachable(err) {
 				t.pool.MarkFailure(candidate.key, targetHost)
 				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
@@ -580,6 +596,9 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 
 			conn, err := candidate.dialContext(ctx, network, addr)
 			if err != nil {
+				if errors.Is(err, errPsiphonNotReady) {
+					continue
+				}
 				if isHostUnreachable(err) {
 					t.pool.MarkFailure(candidate.key, targetHost)
 					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)

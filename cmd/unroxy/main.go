@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 )
 
@@ -64,6 +65,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 	if psiphonDialer != nil {
 		psiphonState := &proxyState{
 			key:         "psiphon://tunnel",
+			url:         &url.URL{Scheme: "psiphon", Host: "tunnel"},
 			dialContext: psiphonDialer.DialContext,
 			country:     "PS",
 		}
