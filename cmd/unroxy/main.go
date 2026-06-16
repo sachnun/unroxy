@@ -59,7 +59,6 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 			Pool:      pool,
 			Transport: transport,
 		})
-		logger.Printf("Pool %q ready: %d proxies", country, pool.Count())
 	}
 
 	if psiphonDialer != nil {
