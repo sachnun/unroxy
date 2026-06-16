@@ -550,6 +550,10 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			if errors.Is(err, errPsiphonNotReady) {
 				continue
 			}
+			if req.Context().Err() != nil {
+				lastErr = err
+				break
+			}
 			if isHostUnreachable(err) {
 				t.pool.MarkFailure(candidate.key, targetHost)
 				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
@@ -600,6 +604,9 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 			if err != nil {
 				if errors.Is(err, errPsiphonNotReady) {
 					continue
+				}
+				if ctx.Err() != nil {
+					break
 				}
 				if isHostUnreachable(err) {
 					t.pool.MarkFailure(candidate.key, targetHost)
