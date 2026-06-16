@@ -83,15 +83,18 @@ func parseServerEntries(raw string) map[string]serverEntryInfo {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		ipBytes, err := hex.DecodeString(parts[0])
+
+		decoded, err := hex.DecodeString(line)
 		if err != nil {
 			continue
 		}
-		ip := string(ipBytes)
+		decodedLine := string(decoded)
+
+		parts := strings.SplitN(decodedLine, " ", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		ip := parts[0]
 
 		var entry struct {
 			IpAddress       string `json:"ipAddress"`
@@ -136,24 +139,26 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 
 	psiphon.SetNoticeWriter(psiphon.NewNoticeReceiver(func(notice []byte) {
 		var msg struct {
-			Type         string `json:"noticeType"`
-			DiagnosticID string `json:"diagnosticID"`
-			Region       string `json:"region"`
-			Protocol     string `json:"protocol"`
+			Type string `json:"noticeType"`
+			Data struct {
+				DiagnosticID string `json:"diagnosticID"`
+				Region       string `json:"region"`
+				Protocol     string `json:"protocol"`
+			} `json:"data"`
 		}
 		if json.Unmarshal(notice, &msg) != nil {
 			return
 		}
 
 		if msg.Type == "ConnectedServer" {
-			if entry, ok := d.serverEntries[msg.DiagnosticID]; ok {
-				logger.Printf("Psiphon: tunnel connected - %s (%s) [%s]", entry.ip, entry.region, msg.Protocol)
+			if entry, ok := d.serverEntries[msg.Data.DiagnosticID]; ok {
+				logger.Printf("Psiphon: tunnel connected - %s (%s) [%s]", entry.ip, entry.region, msg.Data.Protocol)
 			}
 		}
 
 		if msg.Type == "ActiveTunnel" {
 			n := d.tunnelReady.Add(1)
-			if entry, ok := d.serverEntries[msg.DiagnosticID]; ok {
+			if entry, ok := d.serverEntries[msg.Data.DiagnosticID]; ok {
 				regionMu.Lock()
 				regionCount[entry.region]++
 				regionMu.Unlock()
