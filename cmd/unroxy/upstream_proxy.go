@@ -25,14 +25,20 @@ const (
 	proxyDialTimeout       = 5 * time.Second
 	proxyHeaderTimeout     = 20 * time.Second
 	proxyHealthTimeout     = 3 * time.Second
-	proxiflyFetchTimeout   = 30 * time.Second
-	proxiflyRefreshEvery   = 15 * time.Minute
+	providerFetchTimeout   = 30 * time.Second
+	providerRefreshEvery   = 5 * time.Minute
 	healthCheckConcurrency = 300
 )
 
+type ProxyProvider interface {
+	Name() string
+	Fetch() ([]*proxyState, error)
+	ETag() (string, error)
+}
+
 var (
-	proxiflyBaseURL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/"
-	errNoUpstreamProxy    = errors.New("no upstream proxies available")
+	proxiflyBaseURL    = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/"
+	errNoUpstreamProxy = errors.New("no upstream proxies available")
 )
 
 type proxiflyProxy struct {
@@ -88,8 +94,41 @@ func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
 
 // ── Proxifly ──────────────────────────────────────────────────────────
 
+type proxiflyProvider struct{}
+
+func (p *proxiflyProvider) Name() string { return "Proxifly" }
+
+func (p *proxiflyProvider) ETag() (string, error) {
+	client := &http.Client{Timeout: providerFetchTimeout}
+	var etags []string
+	for _, path := range []string{
+		"protocols/socks5/data.json",
+		"protocols/socks4/data.json",
+	} {
+		req, err := http.NewRequest(http.MethodHead, proxiflyBaseURL+path, nil)
+		if err != nil {
+			return "", err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		resp.Body.Close()
+		et := resp.Header.Get("ETag")
+		if et == "" {
+			return "", fmt.Errorf("no ETag for %s", path)
+		}
+		etags = append(etags, et)
+	}
+	return strings.Join(etags, "|"), nil
+}
+
+func (p *proxiflyProvider) Fetch() ([]*proxyState, error) {
+	return fetchProxiflyProxies()
+}
+
 func fetchProxiflyProxies() ([]*proxyState, error) {
-	client := &http.Client{Timeout: proxiflyFetchTimeout}
+	client := &http.Client{Timeout: providerFetchTimeout}
 
 	all := make([]*proxyState, 0)
 
@@ -230,31 +269,46 @@ func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*prox
 	return pools, proxies, nil
 }
 
-func startProxiflyRefresh(countryPools map[string]*ProxyPool, defaultPool *ProxyPool, logger *log.Logger) {
+func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*ProxyPool, defaultPool *ProxyPool, logger *log.Logger) {
 	go func() {
-		ticker := time.NewTicker(proxiflyRefreshEvery)
+		ticker := time.NewTicker(providerRefreshEvery)
 		defer ticker.Stop()
 
+		lastETags := make(map[string]string)
 		for range ticker.C {
-			proxies, err := fetchProxiflyProxies()
-			if err != nil {
-				logger.Printf("Proxifly refresh failed: %v", err)
-				continue
-			}
-
-			logger.Printf("Proxifly: %d proxies", len(proxies))
-			proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
-			groups := groupProxiesByCountry(proxies)
-
-			defaultPool.Replace(proxies)
-
-			for country, states := range groups {
-				if pool, ok := countryPools[country]; ok {
-					pool.Replace(states)
+			for _, provider := range providers {
+				name := provider.Name()
+				etag, err := provider.ETag()
+				if err != nil {
+					logger.Printf("%s ETag check failed: %v", name, err)
+					continue
 				}
-			}
+				if etag == lastETags[name] {
+					logger.Printf("%s: no change", name)
+					continue
+				}
 
-			logger.Printf("Proxies refreshed: %d healthy proxies", len(proxies))
+				proxies, err := provider.Fetch()
+				if err != nil {
+					logger.Printf("%s refresh failed: %v", name, err)
+					continue
+				}
+
+				logger.Printf("%s: %d proxies", name, len(proxies))
+				proxies = testProxiesConcurrently(proxies, healthCheckConcurrency, logger)
+				groups := groupProxiesByCountry(proxies)
+
+				defaultPool.Replace(proxies)
+
+				for country, states := range groups {
+					if pool, ok := countryPools[country]; ok {
+						pool.Replace(states)
+					}
+				}
+
+				lastETags[name] = etag
+				logger.Printf("%s refreshed: %d healthy proxies", name, len(proxies))
+			}
 		}
 	}()
 }

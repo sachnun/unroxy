@@ -55,7 +55,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 	logger.Printf("Total: %d proxies across %d countries", len(allProxies), len(countryPools))
 
 	// Start refresh for all pools
-	startProxiflyRefresh(countryPools, defaultPool, logger)
+	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, logger)
 
 	return NewPoolRouter(named, defaultTransport)
 }
