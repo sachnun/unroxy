@@ -555,10 +555,17 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				break
 			}
 			if isHostUnreachable(err) {
-				t.pool.MarkFailure(candidate.key, targetHost)
+				if !isPsiphonCandidate(candidate) {
+					t.pool.MarkFailure(candidate.key, targetHost)
+				}
 				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
 				lastErr = err
 				break
+			}
+			if isPsiphonCandidate(candidate) {
+				logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
+				lastErr = err
+				continue
 			}
 			t.pool.MarkFailure(candidate.key, targetHost)
 			logger.Printf("[ERR] %s -> %s (%v)", targetLog, candidateLogAddress(candidate), err)
@@ -569,7 +576,9 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		if shouldRetryStatus(resp.StatusCode) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			t.pool.MarkFailure(candidate.key, targetHost)
+			if !isPsiphonCandidate(candidate) {
+				t.pool.MarkFailure(candidate.key, targetHost)
+			}
 			logger.Printf("[RETRY] %s -> %s (%d)", targetLog, candidateLogAddress(candidate), resp.StatusCode)
 			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
 			continue
@@ -609,9 +618,15 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 					break
 				}
 				if isHostUnreachable(err) {
-					t.pool.MarkFailure(candidate.key, targetHost)
+					if !isPsiphonCandidate(candidate) {
+						t.pool.MarkFailure(candidate.key, targetHost)
+					}
 					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
 					break
+				}
+				if isPsiphonCandidate(candidate) {
+					logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
+					continue
 				}
 				t.pool.MarkFailure(candidate.key, targetHost)
 				logger.Printf("[ERR] CONNECT %s -> %s (%v)", addr, candidateLogAddress(candidate), err)
@@ -774,6 +789,10 @@ func shouldRetryStatus(statusCode int) bool {
 
 func isHostUnreachable(err error) bool {
 	return strings.Contains(err.Error(), "host unreachable")
+}
+
+func isPsiphonCandidate(c proxyCandidate) bool {
+	return c.url != nil && c.url.Scheme == "psiphon"
 }
 
 func cloneProxyStates(proxies []*proxyState) []*proxyState {

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
 )
@@ -19,6 +20,8 @@ import (
 var embeddedServerList string
 
 var errPsiphonNotReady = errors.New("psiphon not ready")
+
+const psiphonRetryCount = 3
 
 type PsiphonDialer struct {
 	controller  *psiphon.Controller
@@ -60,6 +63,9 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 				logger.Printf("Psiphon: %d/%d tunnels established", n, poolSize)
 			}
 		}
+		if msg.Type == "ConnectedTunnel" {
+			logger.Printf("Psiphon: tunnel connected")
+		}
 	}))
 
 	pc := buildPsiphonConfig(dataDir, poolSize, minIdle, maxTunnels)
@@ -97,7 +103,11 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 
 	go controller.Run(ctx)
 
-	logger.Printf("Psiphon tunnel starting (pool=%d, min_idle=%d, max=%d)", poolSize, minIdle, maxTunnels)
+	refreshInterval := envDuration("PSIPHON_REFRESH_INTERVAL", 30*time.Minute)
+	refreshCount := envInt("PSIPHON_REFRESH_COUNT", 4)
+	d.startTunnelRefresh(ctx, refreshInterval, refreshCount, logger)
+
+	logger.Printf("Psiphon tunnel starting (pool=%d, min_idle=%d, max=%d, refresh=%s/%d)", poolSize, minIdle, maxTunnels, refreshInterval, refreshCount)
 	return d, nil
 }
 
@@ -105,11 +115,40 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 	if d.tunnelReady.Load() == 0 {
 		return nil, errPsiphonNotReady
 	}
-	return d.controller.Dial(addr, nil)
+	var lastErr error
+	for i := 0; i < psiphonRetryCount; i++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		conn, err := d.controller.Dial(addr, nil)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func (d *PsiphonDialer) Close() {
 	d.once.Do(func() { d.cancel() })
+}
+
+func (d *PsiphonDialer) startTunnelRefresh(ctx context.Context, interval time.Duration, count int, logger *log.Logger) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for i := 0; i < count; i++ {
+					d.controller.TerminateNextActiveTunnel()
+				}
+				logger.Printf("Psiphon: refreshed %d tunnels", count)
+			}
+		}
+	}()
 }
 
 func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int) map[string]interface{} {
@@ -169,6 +208,15 @@ func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
 		}
 	}
 	return def
