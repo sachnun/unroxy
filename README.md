@@ -1,7 +1,3 @@
-# Unroxy
-
-Proxy server with URL rewriting.
-
 ## Usage
 
 ```bash
