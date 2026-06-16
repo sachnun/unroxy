@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
 	"unroxy/cmd/unroxy/rewriter"
 )
 
@@ -201,8 +203,30 @@ func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, domain, path, qu
 		}
 	}
 
+	if domain != "" && !isValidDomain(domain) {
+		return "", "", "", ""
+	}
+
 	query = r.URL.RawQuery
 	return pool, domain, path, query
+}
+
+func isValidDomain(s string) bool {
+	ascii, err := idna.ToASCII(s)
+	if err != nil || ascii == "" {
+		return false
+	}
+	parts := strings.Split(ascii, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if len(part) == 0 {
+			return false
+		}
+	}
+	_, isICANN := publicsuffix.PublicSuffix(ascii)
+	return isICANN
 }
 
 func (h *ProxyHandler) createProxy(domain, path, query string, transport http.RoundTripper) *httputil.ReverseProxy {
