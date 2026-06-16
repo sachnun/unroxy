@@ -21,6 +21,12 @@ func TestProxyHandler_ServeHTTP_InvalidPath(t *testing.T) {
 	}
 }
 
+func TestIsValidDomainAcceptsPrivatePublicSuffix(t *testing.T) {
+	if !isValidDomain("httpbin.org") {
+		t.Fatal("expected httpbin.org to be valid")
+	}
+}
+
 func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
 	mock := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{

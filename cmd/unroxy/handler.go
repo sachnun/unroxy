@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"golang.org/x/net/idna"
-	"golang.org/x/net/publicsuffix"
 	"unroxy/cmd/unroxy/rewriter"
 )
 
@@ -232,8 +231,7 @@ func isValidDomain(s string) bool {
 			return false
 		}
 	}
-	_, isICANN := publicsuffix.PublicSuffix(ascii)
-	return isICANN
+	return true
 }
 
 func (h *ProxyHandler) isResolvable(domain string) bool {
