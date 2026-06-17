@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,10 +50,41 @@ type PsiphonDialer struct {
 
 	serverEntries map[string]serverEntryInfo
 	lastConnected atomic.Pointer[tunnelInfo]
+	hostTunnels   sync.Map // host string -> *tunnelInfo
 }
 
-func (d *PsiphonDialer) LastConnectedInfo() *tunnelInfo {
-	return d.lastConnected.Load()
+func (d *PsiphonDialer) TunnelInfoForHost(host string) *tunnelInfo {
+	v, ok := d.hostTunnels.Load(host)
+	if !ok {
+		return nil
+	}
+	return v.(*tunnelInfo)
+}
+
+func serverIDFromConn(conn net.Conn) string {
+	v := reflect.ValueOf(conn)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	f := v.FieldByName("serverID")
+	if f.IsValid() {
+		return f.String()
+	}
+	// try embedded conn
+	if v.Kind() == reflect.Struct {
+		for i := 0; i < v.NumField(); i++ {
+			fv := v.Field(i)
+			if fv.Kind() == reflect.Interface || fv.Kind() == reflect.Ptr {
+				if inner := fv.Elem(); inner.IsValid() && inner.Kind() == reflect.Ptr {
+					inner = inner.Elem()
+					if sf := inner.FieldByName("serverID"); sf.IsValid() {
+						return sf.String()
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func formatRegionSummary(regionCount map[string]int) string {
@@ -225,6 +257,18 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 		}
 		conn, err := d.controller.Dial(addr, nil)
 		if err == nil {
+			host, _, _ := net.SplitHostPort(addr)
+			serverIP := serverIDFromConn(conn)
+			for _, e := range d.serverEntries {
+				if e.ip == serverIP {
+					proto := ""
+					if ti := d.lastConnected.Load(); ti != nil && ti.ip == serverIP {
+						proto = ti.protocol
+					}
+					d.hostTunnels.Store(host, &tunnelInfo{ip: e.ip, region: e.region, protocol: proto})
+					break
+				}
+			}
 			return conn, nil
 		}
 		lastErr = err
