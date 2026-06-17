@@ -48,27 +48,11 @@ type PsiphonDialer struct {
 	targetPool  int
 
 	serverEntries map[string]serverEntryInfo
-	activeTunnels sync.Map   // diagnosticID -> *tunnelInfo
-	tunnelOrder   []string   // diagnosticIDs in ConnectedServer order
-	tunnelOrderMu sync.Mutex // protects tunnelOrder
-	nextTunnelIdx atomic.Int64
+	lastConnected atomic.Pointer[tunnelInfo]
 }
 
-func (d *PsiphonDialer) NextTunnelInfo() *tunnelInfo {
-	d.tunnelOrderMu.Lock()
-	n := len(d.tunnelOrder)
-	d.tunnelOrderMu.Unlock()
-	if n == 0 {
-		return nil
-	}
-	idx := d.nextTunnelIdx.Add(1) - 1
-	d.tunnelOrderMu.Lock()
-	diagID := d.tunnelOrder[idx%int64(n)]
-	d.tunnelOrderMu.Unlock()
-	if v, ok := d.activeTunnels.Load(diagID); ok {
-		return v.(*tunnelInfo)
-	}
-	return nil
+func (d *PsiphonDialer) LastConnectedInfo() *tunnelInfo {
+	return d.lastConnected.Load()
 }
 
 func formatRegionSummary(regionCount map[string]int) string {
@@ -164,11 +148,7 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 
 		if msg.Type == "ConnectedServer" {
 			if entry, ok := d.serverEntries[msg.Data.DiagnosticID]; ok {
-				info := &tunnelInfo{ip: entry.ip, region: entry.region, protocol: msg.Data.Protocol}
-				d.activeTunnels.Store(msg.Data.DiagnosticID, info)
-				d.tunnelOrderMu.Lock()
-				d.tunnelOrder = append(d.tunnelOrder, msg.Data.DiagnosticID)
-				d.tunnelOrderMu.Unlock()
+				d.lastConnected.Store(&tunnelInfo{ip: entry.ip, region: entry.region, protocol: msg.Data.Protocol})
 				logger.Printf("Psiphon: tunnel connected - %s (%s) [%s]", entry.ip, entry.region, msg.Data.Protocol)
 			}
 		}

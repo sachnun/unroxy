@@ -503,7 +503,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 
 		var ti *tunnelInfo
 		if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
-			ti = candidate.psiphon.NextTunnelInfo()
+			ti = candidate.psiphon.LastConnectedInfo()
 		}
 
 		if candidate.dialContext != nil {
@@ -586,7 +586,7 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 
 			var ti *tunnelInfo
 			if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
-				ti = candidate.psiphon.NextTunnelInfo()
+				ti = candidate.psiphon.LastConnectedInfo()
 			}
 
 			conn, err := candidate.dialContext(ctx, network, addr)
@@ -655,7 +655,7 @@ func candidateLogAddress(c proxyCandidate, ti *tunnelInfo) string {
 
 func candidateProtoPrefix(ti *tunnelInfo) string {
 	if ti != nil && ti.protocol != "" {
-		return "[" + ti.protocol + "]"
+		return "[TUN]"
 	}
 	return ""
 }
