@@ -220,7 +220,7 @@ func NewProxiflyCountryPools(logger *log.Logger) (map[string]*ProxyPool, []*prox
 	return pools, proxies, nil
 }
 
-func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*ProxyPool, defaultPool *ProxyPool, psiphonState *proxyState, logger *log.Logger) {
+func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*ProxyPool, defaultPool *ProxyPool, onRefresh func(), logger *log.Logger) {
 	go func() {
 		ticker := time.NewTicker(providerRefreshEvery)
 		defer ticker.Stop()
@@ -259,15 +259,21 @@ func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*Proxy
 				groups := groupProxiesByCountry(proxies)
 
 				defaultPool.Replace(proxies)
-				if psiphonState != nil {
-					defaultPool.SetPrimary(psiphonState)
+				if onRefresh != nil {
+					onRefresh()
 				}
 
 				for country, states := range groups {
 					if pool, ok := countryPools[country]; ok {
 						pool.Replace(states)
-						if psiphonState != nil {
-							pool.SetPrimary(psiphonState)
+						if countryDialer, ok := regionDialers[country]; ok {
+							pool.SetPrimary(&proxyState{
+								key:         "psiphon://" + country,
+								url:         &url.URL{Scheme: "psiphon", Host: country},
+								dialContext: countryDialer.DialContext,
+								country:     country,
+								psiphon:     countryDialer,
+							})
 						}
 					}
 				}

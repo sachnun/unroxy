@@ -123,7 +123,20 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 		logger.Printf("Psiphon: %s ready (%d tunnels)", strings.Join(regionSummary, " "), totalTunnels)
 	}
 
-	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, nil, logger)
+	readdPsiphon := func() {
+		for _, dialer := range regionDialers {
+			ps := &proxyState{
+				key:         "psiphon://" + dialer.region,
+				url:         &url.URL{Scheme: "psiphon", Host: dialer.region},
+				dialContext: dialer.DialContext,
+				country:     dialer.region,
+				psiphon:     dialer,
+			}
+			defaultPool.SetPrimary(ps)
+		}
+	}
+
+	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, readdPsiphon, logger)
 
 	return NewPoolRouter(named, defaultTransport)
 }
