@@ -41,9 +41,10 @@ type tunnelInfo struct {
 }
 
 var (
-	allServerEntries map[string]serverEntryInfo
-	protocolByIP     sync.Map
-	regionDialers    = make(map[string]*PsiphonDialer)
+	allServerEntries  map[string]serverEntryInfo
+	protocolByIP      sync.Map
+	regionDialers     = make(map[string]*PsiphonDialer)
+	globalHostTunnels sync.Map // host -> *tunnelInfo (shared all dialers)
 )
 
 type PsiphonDialer struct {
@@ -56,11 +57,10 @@ type PsiphonDialer struct {
 	region      string
 
 	serverEntries map[string]serverEntryInfo
-	hostTunnels   sync.Map
 }
 
-func (d *PsiphonDialer) TunnelInfoForHost(host string) *tunnelInfo {
-	v, ok := d.hostTunnels.Load(host)
+func TunnelInfoForHost(host string) *tunnelInfo {
+	v, ok := globalHostTunnels.Load(host)
 	if !ok {
 		return nil
 	}
@@ -256,7 +256,7 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 					if v, ok := protocolByIP.Load(serverIP); ok {
 						proto, _ = v.(string)
 					}
-					d.hostTunnels.Store(host, &tunnelInfo{ip: e.ip, region: e.region, protocol: proto})
+					globalHostTunnels.Store(host, &tunnelInfo{ip: e.ip, region: e.region, protocol: proto})
 					break
 				}
 			}

@@ -518,8 +518,8 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		}
 
 		var ti *tunnelInfo
-		if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
-			ti = candidate.psiphon.TunnelInfoForHost(targetHost)
+		if isPsiphonCandidate(candidate) {
+			ti = TunnelInfoForHost(targetHost)
 		}
 
 		proto := candidateProtoPrefix(ti)
@@ -587,9 +587,9 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 			}
 
 			var ti *tunnelInfo
-			if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
+			if isPsiphonCandidate(candidate) {
 				host, _, _ := net.SplitHostPort(addr)
-				ti = candidate.psiphon.TunnelInfoForHost(host)
+				ti = TunnelInfoForHost(host)
 			}
 
 			conn, err := candidate.dialContext(ctx, network, addr)
