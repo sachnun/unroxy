@@ -502,9 +502,8 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		var err error
 
 		var ti *tunnelInfo
-		if isPsiphonCandidate(candidate) {
-			reqID := atomic.AddInt64(&reqCounter, 1)
-			attemptReq = attemptReq.WithContext(context.WithValue(attemptReq.Context(), reqIDKey{}, reqID))
+		if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
+			ti = candidate.psiphon.NextTunnelInfo()
 		}
 
 		if candidate.dialContext != nil {
@@ -519,11 +518,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 		} else {
 			resp, err = t.transport.RoundTrip(attemptReq)
-		}
-
-		if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
-			reqID, _ := attemptReq.Context().Value(reqIDKey{}).(int64)
-			ti = candidate.psiphon.PopTunnelInfo(reqID)
 		}
 
 		proto := candidateProtoPrefix(ti)
@@ -591,18 +585,11 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 			}
 
 			var ti *tunnelInfo
-			dialCtx := ctx
-			if isPsiphonCandidate(candidate) {
-				reqID := atomic.AddInt64(&reqCounter, 1)
-				dialCtx = context.WithValue(ctx, reqIDKey{}, reqID)
-			}
-
-			conn, err := candidate.dialContext(dialCtx, network, addr)
-
 			if isPsiphonCandidate(candidate) && candidate.psiphon != nil {
-				reqID, _ := dialCtx.Value(reqIDKey{}).(int64)
-				ti = candidate.psiphon.PopTunnelInfo(reqID)
+				ti = candidate.psiphon.NextTunnelInfo()
 			}
+
+			conn, err := candidate.dialContext(ctx, network, addr)
 
 			proto := candidateProtoPrefix(ti)
 			if err != nil {

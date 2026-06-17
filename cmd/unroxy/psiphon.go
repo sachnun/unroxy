@@ -48,16 +48,27 @@ type PsiphonDialer struct {
 	targetPool  int
 
 	serverEntries map[string]serverEntryInfo
-	tunnelByReq   sync.Map // int64 -> *tunnelInfo
-	ipProtocols   sync.Map // IP string -> protocol string
+	activeTunnels sync.Map   // diagnosticID -> *tunnelInfo
+	tunnelOrder   []string   // diagnosticIDs in ConnectedServer order
+	tunnelOrderMu sync.Mutex // protects tunnelOrder
+	nextTunnelIdx atomic.Int64
 }
 
-func (d *PsiphonDialer) PopTunnelInfo(reqID int64) *tunnelInfo {
-	v, ok := d.tunnelByReq.LoadAndDelete(reqID)
-	if !ok {
+func (d *PsiphonDialer) NextTunnelInfo() *tunnelInfo {
+	d.tunnelOrderMu.Lock()
+	n := len(d.tunnelOrder)
+	d.tunnelOrderMu.Unlock()
+	if n == 0 {
 		return nil
 	}
-	return v.(*tunnelInfo)
+	idx := d.nextTunnelIdx.Add(1) - 1
+	d.tunnelOrderMu.Lock()
+	diagID := d.tunnelOrder[idx%int64(n)]
+	d.tunnelOrderMu.Unlock()
+	if v, ok := d.activeTunnels.Load(diagID); ok {
+		return v.(*tunnelInfo)
+	}
+	return nil
 }
 
 func formatRegionSummary(regionCount map[string]int) string {
@@ -153,9 +164,11 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 
 		if msg.Type == "ConnectedServer" {
 			if entry, ok := d.serverEntries[msg.Data.DiagnosticID]; ok {
-				if msg.Data.Protocol != "" {
-					d.ipProtocols.Store(entry.ip, msg.Data.Protocol)
-				}
+				info := &tunnelInfo{ip: entry.ip, region: entry.region, protocol: msg.Data.Protocol}
+				d.activeTunnels.Store(msg.Data.DiagnosticID, info)
+				d.tunnelOrderMu.Lock()
+				d.tunnelOrder = append(d.tunnelOrder, msg.Data.DiagnosticID)
+				d.tunnelOrderMu.Unlock()
 				logger.Printf("Psiphon: tunnel connected - %s (%s) [%s]", entry.ip, entry.region, msg.Data.Protocol)
 			}
 		}
@@ -221,15 +234,10 @@ func NewPsiphonDialer(logger *log.Logger) (*PsiphonDialer, error) {
 	return d, nil
 }
 
-type reqIDKey struct{}
-
-var reqCounter int64
-
 func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d.tunnelReady.Load() == 0 {
 		return nil, errPsiphonNotReady
 	}
-	reqID, _ := ctx.Value(reqIDKey{}).(int64)
 	var lastErr error
 	for i := 0; i < psiphonRetryCount; i++ {
 		if ctx.Err() != nil {
@@ -237,18 +245,6 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 		}
 		conn, err := d.controller.Dial(addr, nil)
 		if err == nil {
-			if host, _, splitErr := net.SplitHostPort(conn.RemoteAddr().String()); splitErr == nil {
-				for _, e := range d.serverEntries {
-					if e.ip == host {
-						proto, _ := d.ipProtocols.Load(host)
-						protoStr, _ := proto.(string)
-						if reqID != 0 {
-							d.tunnelByReq.Store(reqID, &tunnelInfo{ip: e.ip, region: e.region, protocol: protoStr})
-						}
-						break
-					}
-				}
-			}
 			return conn, nil
 		}
 		lastErr = err
