@@ -70,8 +70,8 @@ func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
 			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
 		},
-		failedByHost: map[string]map[string]bool{
-			"ipwho.is": {"http://failed:80": true},
+		failedByHost: map[string]map[string]time.Time{
+			"ipwho.is": {"http://failed:80": time.Now()},
 		},
 	}
 
@@ -122,8 +122,8 @@ func TestProxyPoolReplaceSwapsProxies(t *testing.T) {
 		proxies: []*proxyState{
 			{key: "http://old:80", url: mustParseURL(t, "http://old:80")},
 		},
-		failedByHost: map[string]map[string]bool{
-			"example.com": {"http://old:80": true},
+		failedByHost: map[string]map[string]time.Time{
+			"example.com": {"http://old:80": time.Now()},
 		},
 	}
 
@@ -225,8 +225,8 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 			{key: "https://blocked:443", url: mustParseURL(t, "https://blocked:443")},
 			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
 		},
-		failedByHost: map[string]map[string]bool{
-			"example.com": {"http://good:80": true},
+		failedByHost: map[string]map[string]time.Time{
+			"example.com": {"http://good:80": time.Now()},
 		},
 	}
 

@@ -28,6 +28,7 @@ const (
 	providerFetchTimeout   = 30 * time.Second
 	providerRefreshEvery   = 5 * time.Minute
 	healthCheckConcurrency = 300
+	failureTTL             = 10 * time.Minute
 )
 
 type ProxyProvider interface {
@@ -175,7 +176,7 @@ type ProxyPool struct {
 
 	mu           sync.RWMutex
 	proxies      []*proxyState
-	failedByHost map[string]map[string]bool
+	failedByHost map[string]map[string]time.Time
 }
 
 func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
@@ -361,9 +362,10 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			psiphon:     state.psiphon,
 		}
 
-		if failedKeys[state.key] {
+		if failedAt, isFailed := failedKeys[state.key]; isFailed && time.Since(failedAt) < failureTTL {
 			failed = append(failed, candidate)
 		} else {
+			delete(failedKeys, state.key)
 			ready = append(ready, candidate)
 		}
 	}
@@ -417,12 +419,12 @@ func (p *ProxyPool) MarkFailure(key, targetHost string) {
 		rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
 		if rotationKey != "" {
 			if p.failedByHost == nil {
-				p.failedByHost = make(map[string]map[string]bool)
+				p.failedByHost = make(map[string]map[string]time.Time)
 			}
 			if p.failedByHost[rotationKey] == nil {
-				p.failedByHost[rotationKey] = make(map[string]bool)
+				p.failedByHost[rotationKey] = make(map[string]time.Time)
 			}
-			p.failedByHost[rotationKey][key] = true
+			p.failedByHost[rotationKey][key] = time.Now()
 		}
 		return
 	}
