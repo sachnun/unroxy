@@ -3,23 +3,17 @@ package main
 import (
 	"context"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"os"
 	"reflect"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
-	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/protocol"
 )
 
 //go:embed server_entries.txt
@@ -28,24 +22,6 @@ var embeddedServerList string
 var errPsiphonNotReady = errors.New("psiphon not ready")
 
 const psiphonRetryCount = 3
-
-type serverEntryInfo struct {
-	ip     string
-	region string
-}
-
-type tunnelInfo struct {
-	ip       string
-	region   string
-	protocol string
-}
-
-var (
-	allServerEntries  map[string]serverEntryInfo
-	protocolByIP      sync.Map
-	regionDialers     = make(map[string]*PsiphonDialer)
-	globalHostTunnels sync.Map // host -> *tunnelInfo (shared all dialers)
-)
 
 type PsiphonDialer struct {
 	controller  *psiphon.Controller
@@ -90,85 +66,6 @@ func serverIDFromConn(conn net.Conn) string {
 		}
 	}
 	return ""
-}
-
-func parseServerEntries(raw string) map[string]serverEntryInfo {
-	entries := make(map[string]serverEntryInfo)
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		decoded, err := hex.DecodeString(line)
-		if err != nil {
-			continue
-		}
-		decodedLine := string(decoded)
-		parts := strings.SplitN(decodedLine, " ", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		ip := parts[0]
-		var entry struct {
-			IpAddress       string `json:"ipAddress"`
-			WebServerSecret string `json:"webServerSecret"`
-			Region          string `json:"region"`
-		}
-		if json.Unmarshal([]byte(parts[1]), &entry) != nil {
-			continue
-		}
-		if entry.IpAddress == "" || entry.WebServerSecret == "" {
-			continue
-		}
-		tag := protocol.GenerateServerEntryTag(entry.IpAddress, entry.WebServerSecret)
-		diagID := protocol.TagToDiagnosticID(tag)
-		entries[diagID] = serverEntryInfo{ip: ip, region: entry.Region}
-	}
-	return entries
-}
-
-func serversByRegion() map[string]int {
-	counts := make(map[string]int)
-	for _, e := range allServerEntries {
-		if e.region != "" {
-			counts[e.region]++
-		}
-	}
-	return counts
-}
-
-func initPsiphonNoticeHandler(logger *log.Logger) {
-	psiphon.SetNoticeWriter(psiphon.NewNoticeReceiver(func(notice []byte) {
-		var msg struct {
-			Type string `json:"noticeType"`
-			Data struct {
-				DiagnosticID string `json:"diagnosticID"`
-				Protocol     string `json:"protocol"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(notice, &msg) != nil {
-			return
-		}
-
-		if msg.Type == "ConnectedServer" {
-			if entry, ok := allServerEntries[msg.Data.DiagnosticID]; ok {
-				if msg.Data.Protocol != "" {
-					protocolByIP.Store(entry.ip, msg.Data.Protocol)
-				}
-			}
-		}
-
-		if msg.Type == "ActiveTunnel" {
-			if entry, ok := allServerEntries[msg.Data.DiagnosticID]; ok {
-				if d, ok := regionDialers[entry.region]; ok {
-					n := d.tunnelReady.Add(1)
-					if int(n) == d.targetPool {
-						logger.Printf("Psiphon [%s]: %d/%d tunnels ready", entry.region, n, d.targetPool)
-					}
-				}
-			}
-		}
-	}))
 }
 
 func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*PsiphonDialer, error) {
@@ -286,110 +183,4 @@ func (d *PsiphonDialer) startTunnelRefresh(ctx context.Context, interval time.Du
 			}
 		}
 	}()
-}
-
-func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int, egressRegion string) map[string]interface{} {
-	if minIdle > poolSize {
-		minIdle = poolSize
-	}
-	if maxTunnels < poolSize {
-		maxTunnels = poolSize
-	}
-
-	sshWindowSize := 32
-	pc := map[string]interface{}{
-		"LocalSocksProxyPort":            0,
-		"LocalHttpProxyPort":             0,
-		"PropagationChannelId":           "FFFFFFFFFFFFFFFF",
-		"SponsorId":                      "FFFFFFFFFFFFFFFF",
-		"EstablishTunnelTimeoutSeconds":  60,
-		"TunnelPoolSize":                 poolSize,
-		"MaxTunnelPoolSize":              maxTunnels,
-		"MinIdleTunnels":                 minIdle,
-		"DisableRemoteServerListFetcher": true,
-		"DisableDSLFetcher":              true,
-		"DataRootDirectory":              dataDir,
-		"NetworkID":                      envOrDefault("PSIPHON_NETWORK_ID", "WIFI"),
-		"EmitDiagnosticNotices":          true,
-		"DisableTactics":                 true,
-		"LimitMeekBufferSizes":           false,
-		"LimitRelayBufferSizes":          false,
-		"LimitCPUThreads":                true,
-		"ConnectionWorkerPoolMaxSize":    4,
-		"SSHChannelWindowSize":           &sshWindowSize,
-		"DisableServerEntriesReporter":   true,
-		"DisableReplay":                  true,
-		"IgnoreHandshakeStatsRegexps":    true,
-	}
-
-	if egressRegion != "" {
-		pc["EgressRegion"] = egressRegion
-	}
-
-	if overlay := os.Getenv("PSIPHON_JSON"); overlay != "" {
-		var m map[string]interface{}
-		if json.Unmarshal([]byte(overlay), &m) == nil {
-			for k, v := range m {
-				pc[k] = v
-			}
-		}
-	}
-
-	return pc
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return def
-}
-
-func envDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func formatRegionSummary(regionCount map[string]int) string {
-	type kv struct {
-		region string
-		count  int
-	}
-	sorted := make([]kv, 0, len(regionCount))
-	for r, c := range regionCount {
-		sorted = append(sorted, kv{r, c})
-	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].count > sorted[j].count })
-	parts := make([]string, len(sorted))
-	for i, kv := range sorted {
-		parts[i] = fmt.Sprintf("%s(%d)", kv.region, kv.count)
-	}
-	return strings.Join(parts, ", ")
 }
