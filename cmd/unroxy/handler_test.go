@@ -241,3 +241,85 @@ func TestProxyHandlerDoesNotLogRequestDetails(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", w.Code)
 	}
 }
+
+func TestParsePoolRequest_WarpSkippingInvalidDomain(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "WARP", Username: "WARP"},
+		{Name: "ID", Username: "ID"},
+	}, nil)
+	h := &ProxyHandler{router: router}
+
+	req := httptest.NewRequest(http.MethodGet, "/warp/id/ipwho.is", nil)
+	pool, domain, path, _ := h.parsePoolRequest(req)
+
+	if pool != "WARP" {
+		t.Errorf("expected pool=WARP, got %s", pool)
+	}
+	if domain != "ipwho.is" {
+		t.Errorf("expected domain=ipwho.is, got %s", domain)
+	}
+	if path != "/" {
+		t.Errorf("expected path=/, got %s", path)
+	}
+}
+
+func TestParsePoolRequest_WarpWithValidDomain(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "WARP", Username: "WARP"},
+	}, nil)
+	h := &ProxyHandler{router: router}
+
+	req := httptest.NewRequest(http.MethodGet, "/warp/example.com/path", nil)
+	pool, domain, path, _ := h.parsePoolRequest(req)
+
+	if pool != "WARP" {
+		t.Errorf("expected pool=WARP, got %s", pool)
+	}
+	if domain != "example.com" {
+		t.Errorf("expected domain=example.com, got %s", domain)
+	}
+	if path != "/path" {
+		t.Errorf("expected path=/path, got %s", path)
+	}
+}
+
+func TestParsePoolRequest_WarpCompoundKey(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "WARP", Username: "WARP"},
+		{Name: "WARP/US", Username: "WARP/US"},
+	}, nil)
+	h := &ProxyHandler{router: router}
+
+	req := httptest.NewRequest(http.MethodGet, "/warp/us/example.com", nil)
+	pool, domain, path, _ := h.parsePoolRequest(req)
+
+	if pool != "WARP/US" {
+		t.Errorf("expected pool=WARP/US, got %s", pool)
+	}
+	if domain != "example.com" {
+		t.Errorf("expected domain=example.com, got %s", domain)
+	}
+	if path != "/" {
+		t.Errorf("expected path=/, got %s", path)
+	}
+}
+
+func TestParsePoolRequest_CountryPool(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "ID", Username: "ID"},
+	}, nil)
+	h := &ProxyHandler{router: router}
+
+	req := httptest.NewRequest(http.MethodGet, "/id/ipwho.is", nil)
+	pool, domain, path, _ := h.parsePoolRequest(req)
+
+	if pool != "ID" {
+		t.Errorf("expected pool=ID, got %s", pool)
+	}
+	if domain != "ipwho.is" {
+		t.Errorf("expected domain=ipwho.is, got %s", domain)
+	}
+	if path != "/" {
+		t.Errorf("expected path=/, got %s", path)
+	}
+}
