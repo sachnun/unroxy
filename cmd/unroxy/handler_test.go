@@ -244,7 +244,7 @@ func TestProxyHandlerDoesNotLogRequestDetails(t *testing.T) {
 	}
 }
 
-func TestParsePoolRequest_WarpSkippingInvalidDomain(t *testing.T) {
+func TestParsePoolRequest_WarpRejectsInvalidDomain(t *testing.T) {
 	router := NewPoolRouter([]*NamedPool{
 		{Name: "WARP", Username: "WARP"},
 		{Name: "ID", Username: "ID"},
@@ -252,16 +252,13 @@ func TestParsePoolRequest_WarpSkippingInvalidDomain(t *testing.T) {
 	h := &ProxyHandler{router: router}
 
 	req := httptest.NewRequest(http.MethodGet, "/warp/id/ipwho.is", nil)
-	pool, domain, path, _ := h.parsePoolRequest(req)
+	pool, domain, _, _ := h.parsePoolRequest(req)
 
-	if pool != "WARP" {
-		t.Errorf("expected pool=WARP, got %s", pool)
+	if pool != "" {
+		t.Errorf("expected empty pool, got %s", pool)
 	}
-	if domain != "ipwho.is" {
-		t.Errorf("expected domain=ipwho.is, got %s", domain)
-	}
-	if path != "/" {
-		t.Errorf("expected path=/, got %s", path)
+	if domain != "" {
+		t.Errorf("expected empty domain, got %s", domain)
 	}
 }
 
@@ -317,6 +314,27 @@ func TestParsePoolRequest_CountryPool(t *testing.T) {
 
 	if pool != "ID" {
 		t.Errorf("expected pool=ID, got %s", pool)
+	}
+	if domain != "ipwho.is" {
+		t.Errorf("expected domain=ipwho.is, got %s", domain)
+	}
+	if path != "/" {
+		t.Errorf("expected path=/, got %s", path)
+	}
+}
+
+func TestParsePoolRequest_WarpCompoundKeyWithDomain(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "WARP", Username: "WARP"},
+		{Name: "WARP/ID", Username: "WARP/ID"},
+	}, nil)
+	h := &ProxyHandler{router: router}
+
+	req := httptest.NewRequest(http.MethodGet, "/warp/id/ipwho.is", nil)
+	pool, domain, path, _ := h.parsePoolRequest(req)
+
+	if pool != "WARP/ID" {
+		t.Errorf("expected pool=WARP/ID, got %s", pool)
 	}
 	if domain != "ipwho.is" {
 		t.Errorf("expected domain=ipwho.is, got %s", domain)

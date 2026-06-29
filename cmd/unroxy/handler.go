@@ -253,19 +253,10 @@ func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, domain, path, qu
 					path = "/"
 				}
 			} else {
-				domainIdx := 1
-				for domainIdx < len(parts) {
-					if isValidDomain(parts[domainIdx]) {
-						break
-					}
-					domainIdx++
-				}
-				if domainIdx < len(parts) {
-					domain = parts[domainIdx]
-					path = "/"
-					if domainIdx+1 < len(parts) {
-						path = "/" + strings.Join(parts[domainIdx+1:], "/")
-					}
+				domain = second
+				path = "/"
+				if len(parts) > 2 {
+					path = "/" + strings.Join(parts[2:], "/")
 				}
 			}
 		}
