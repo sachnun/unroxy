@@ -189,6 +189,51 @@ func initWarpRegional(router *PoolRouter, logger *log.Logger) {
 		port++
 		fwdPort++
 	}
+
+	for _, name := range router.Names() {
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "WARP") || strings.Contains(upper, "/") {
+			continue
+		}
+		if _, hasPsiphon := regionDialers[upper]; hasPsiphon {
+			continue
+		}
+		np := router.Get(upper)
+		if np == nil || np.Transport == nil || np.Pool == nil || np.Pool.Count() == 0 {
+			continue
+		}
+
+		rU, rDialer, err := startWarpUsque(fmt.Sprintf("%d", port), fmt.Sprintf("%d", fwdPort), configPath, np.Transport.DialContext, logger)
+		if err != nil {
+			logger.Printf("WARP/%s: start failed (%v)", upper, err)
+			continue
+		}
+		_ = rU
+
+		rWt := &http.Transport{
+			DialContext:           rDialer.DialContext,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          50,
+			MaxIdleConnsPerHost:   5,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+		}
+
+		rTransport := NewRotatingProxyTransport(nil)
+		rTransport.SetWarpTransport(rWt)
+
+		router.Add(&NamedPool{
+			Name:      "WARP/" + upper,
+			Username:  "WARP/" + upper,
+			Pool:      NewProxyPool(logger, nil),
+			Transport: rTransport,
+		})
+		logger.Printf("WARP/%s: active (proxifly), path /warp/%s or auth user \"warp/%s\"", upper, upper, upper)
+
+		port++
+		fwdPort++
+	}
 }
 
 func initWarpUsque(logger *log.Logger) []*NamedPool {

@@ -157,8 +157,12 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 
 	if len(candidates) > 0 {
 		for _, candidate := range candidates {
-			if candidate.dialContext == nil {
-				continue
+			var conn net.Conn
+			var err error
+			if candidate.dialContext != nil {
+				conn, err = candidate.dialContext(ctx, network, addr)
+			} else {
+				conn, err = httpProxyConnect(ctx, candidate.url, addr)
 			}
 
 			var ti *tunnelInfo
@@ -166,8 +170,6 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 				host, _, _ := net.SplitHostPort(addr)
 				ti = TunnelInfoForHost(host)
 			}
-
-			conn, err := candidate.dialContext(ctx, network, addr)
 
 			proto := candidateProtoPrefix(ti)
 			if err != nil {
@@ -367,4 +369,35 @@ func isHostUnreachable(err error) bool {
 
 func isPsiphonCandidate(c proxyCandidate) bool {
 	return c.url != nil && c.url.Scheme == "psiphon"
+}
+
+func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: proxyDialTimeout}
+	conn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
+	if err != nil {
+		return nil, err
+	}
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if _, err := conn.Write([]byte(req)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp := buf[:n]
+	if !bytes.Contains(resp, []byte("200")) {
+		conn.Close()
+		firstLine, _, _ := strings.Cut(string(resp), "\r\n")
+		return nil, fmt.Errorf("proxy rejected CONNECT: %s", firstLine)
+	}
+	conn.SetDeadline(time.Time{})
+	return conn, nil
 }

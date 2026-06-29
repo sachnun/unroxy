@@ -56,6 +56,21 @@ func (r *PoolRouter) Select(username string) *RotatingProxyTransport {
 	return nil
 }
 
+func (r *PoolRouter) Get(name string) *NamedPool {
+	if r == nil || name == "" {
+		return nil
+	}
+	upper := strings.ToUpper(name)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.pools {
+		if strings.ToUpper(p.Name) == upper {
+			return p
+		}
+	}
+	return nil
+}
+
 func (r *PoolRouter) Has(name string) bool {
 	if r == nil || name == "" {
 		return false
