@@ -4,17 +4,19 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 type NamedPool struct {
-	Name     string
-	Username string
-	Password string
-	Pool     *ProxyPool
+	Name      string
+	Username  string
+	Password  string
+	Pool      *ProxyPool
 	Transport *RotatingProxyTransport
 }
 
 type PoolRouter struct {
+	mu               sync.RWMutex
 	pools            []*NamedPool
 	defaultTransport http.RoundTripper
 }
@@ -29,12 +31,23 @@ func NewPoolRouter(pools []*NamedPool, defaultTransport http.RoundTripper) *Pool
 	}
 }
 
+func (r *PoolRouter) Add(p *NamedPool) {
+	if r == nil || p == nil {
+		return
+	}
+	r.mu.Lock()
+	r.pools = append(r.pools, p)
+	r.mu.Unlock()
+}
+
 func (r *PoolRouter) Select(username string) *RotatingProxyTransport {
 	if username == "" || r == nil {
 		return nil
 	}
 
 	upper := strings.ToUpper(username)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, p := range r.pools {
 		if strings.ToUpper(p.Username) == upper {
 			return p.Transport
@@ -49,6 +62,8 @@ func (r *PoolRouter) Has(name string) bool {
 	}
 
 	upper := strings.ToUpper(name)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, p := range r.pools {
 		if strings.ToUpper(p.Name) == upper {
 			return true
@@ -62,6 +77,8 @@ func (r *PoolRouter) Default() http.RoundTripper {
 		return nil
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.defaultTransport
 }
 
@@ -70,6 +87,8 @@ func (r *PoolRouter) Names() []string {
 		return nil
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.pools))
 	for _, p := range r.pools {
 		names = append(names, p.Name)
@@ -82,6 +101,8 @@ func (r *PoolRouter) PoolCount() int {
 		return 0
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	total := 0
 	for _, p := range r.pools {
 		if p.Pool != nil {

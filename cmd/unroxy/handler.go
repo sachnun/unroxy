@@ -195,10 +195,20 @@ func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, domain, path, qu
 	if h.router != nil && !strings.Contains(first, ".") && h.router.Has(strings.ToUpper(first)) {
 		pool = strings.ToUpper(first)
 		if len(parts) > 1 {
-			domain = parts[1]
-			path = "/"
-			if len(parts) > 2 {
-				path = "/" + strings.Join(parts[2:], "/")
+			second := parts[1]
+			compoundKey := strings.ToUpper(first + "/" + second)
+			if !strings.Contains(second, ".") && h.router.Has(compoundKey) {
+				pool = compoundKey
+				if len(parts) > 2 {
+					domain = parts[2]
+					path = "/"
+				}
+			} else {
+				domain = second
+				path = "/"
+				if len(parts) > 2 {
+					path = "/" + strings.Join(parts[2:], "/")
+				}
 			}
 		}
 	} else {
