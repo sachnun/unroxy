@@ -20,6 +20,7 @@ type RotatingProxyTransport struct {
 	pool           *ProxyPool
 	transport      http.RoundTripper
 	dialTransports sync.Map
+	warpTransport  *http.Transport
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -35,7 +36,15 @@ func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
 	}
 }
 
+func (t *RotatingProxyTransport) SetWarpTransport(tr *http.Transport) {
+	t.warpTransport = tr
+}
+
 func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.warpTransport != nil {
+		return t.warpTransport.RoundTrip(req)
+	}
+
 	body, hasBody, err := snapshotRequestBody(req)
 	if err != nil {
 		return nil, err
@@ -136,6 +145,10 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 }
 
 func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if t.warpTransport != nil && t.warpTransport.DialContext != nil {
+		return t.warpTransport.DialContext(ctx, network, addr)
+	}
+
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
 

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -136,7 +139,95 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 		}
 	}
 
+	if warpEnabled() {
+		initWarpUsque(defaultTransport, named, logger)
+	}
+
 	startProxyRefresh([]ProxyProvider{&proxiflyProvider{}}, countryPools, defaultPool, readdPsiphon, logger)
 
 	return NewPoolRouter(named, defaultTransport)
+}
+
+func initWarpUsque(defaultTransport *RotatingProxyTransport, named []*NamedPool, logger *log.Logger) {
+	configPath, err := findUsqueConfig()
+	if err != nil {
+		logger.Printf("WARP register failed (%v)", err)
+		return
+	}
+
+	psiphonDial := pickPsiphonDialer()
+	u, dialer, err := startWarpUsque("40000", "6443", configPath, psiphonDial, logger)
+	if err != nil {
+		logger.Printf("WARP usque failed (%v)", err)
+		return
+	}
+
+	wt := &http.Transport{
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second,
+	}
+
+	defaultTransport.SetWarpTransport(wt)
+	_ = u
+	logger.Printf("WARP: active, default via Psiphon")
+
+	warpCount := 0
+	for _, np := range named {
+		if np.Transport == nil || warpCount >= 1 {
+			continue
+		}
+		poolDialer := pickPoolPsiphonDialer(np.Pool)
+		if poolDialer == nil {
+			continue
+		}
+		port := fmt.Sprintf("%d", 40001+warpCount)
+		fwdPort := fmt.Sprintf("%d", 6443+warpCount)
+		pu, pdialer, err := startWarpUsque(port, fwdPort, configPath, poolDialer, logger)
+		if err != nil {
+			logger.Printf("WARP [%s] failed: %v", np.Name, err)
+			continue
+		}
+		pwt := &http.Transport{
+			DialContext:           pdialer.DialContext,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          50,
+			MaxIdleConnsPerHost:   5,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+		}
+		np.Transport.SetWarpTransport(pwt)
+		_ = pu
+		warpCount++
+		logger.Printf("WARP: %s via Psiphon", np.Name)
+	}
+}
+
+func pickPoolPsiphonDialer(pool *ProxyPool) func(context.Context, string, string) (net.Conn, error) {
+	if pool == nil {
+		return nil
+	}
+	candidates := pool.Candidates(time.Now(), "")
+	for _, c := range candidates {
+		if c.psiphon != nil && c.psiphon.tunnelReady.Load() > 0 {
+			return c.psiphon.DialContext
+		}
+	}
+	return nil
+}
+
+func pickPsiphonDialer() func(context.Context, string, string) (net.Conn, error) {
+	for {
+		for _, d := range regionDialers {
+			if d.tunnelReady.Load() > 0 {
+				return d.DialContext
+			}
+		}
+		time.Sleep(time.Second)
+	}
 }
