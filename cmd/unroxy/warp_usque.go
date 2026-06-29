@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -28,8 +29,8 @@ func startWarpUsque(port, fwdPort, configPath string, psiphonDial func(ctx conte
 	cmd := exec.Command("./usque", "-c", cfg,
 		"socks", "-p", port, "-b", "127.0.0.1",
 		"--http2", "-P", fwdPort)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		return nil, nil, fmt.Errorf("usque start: %w", err)
 	}
