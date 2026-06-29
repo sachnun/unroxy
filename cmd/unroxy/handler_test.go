@@ -16,8 +16,18 @@ func TestProxyHandler_ServeHTTP_InvalidPath(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if body == "" {
+		t.Error("Expected non-empty response body")
+	}
+	if !strings.Contains(body, "Usage") {
+		t.Error("Expected body to contain 'Usage'")
+	}
+	if !strings.Contains(body, "Rewrite") {
+		t.Error("Expected body to contain 'Rewrite'")
 	}
 }
 

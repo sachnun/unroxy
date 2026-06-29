@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -74,7 +75,7 @@ func (h *ProxyHandler) resolveTransport(r *http.Request) http.RoundTripper {
 func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request) {
 	poolName, domain, path, query := h.parsePoolRequest(r)
 	if domain == "" {
-		http.Error(w, "Invalid path. Usage: /domain.com/path", http.StatusBadRequest)
+		h.writeIndexPage(w, r)
 		return
 	}
 
@@ -92,6 +93,32 @@ func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request
 
 	proxy := h.createProxy(domain, path, query, transport)
 	proxy.ServeHTTP(w, r)
+}
+
+func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
+	var buf strings.Builder
+
+	buf.WriteString("Usage\n")
+	buf.WriteString("─────\n")
+	buf.WriteString(fmt.Sprintf("  Rewrite  /example.com/path\n"))
+	buf.WriteString(fmt.Sprintf("           curl http://%s/example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  Forward  curl -x http://%s http://example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  CONNECT  curl -x http://%s https://example.com\n", r.Host))
+
+	if h.router != nil {
+		stats := h.router.Stats()
+		if len(stats.Pools) > 0 {
+			buf.WriteString("\nPools\n")
+			buf.WriteString("─────\n")
+			for _, p := range stats.Pools {
+				buf.WriteString(fmt.Sprintf("  %-10s(%d) → /%s/example.com\n", p.Name, p.ProxyCount, strings.ToLower(p.Name)))
+			}
+			buf.WriteString(fmt.Sprintf("\nTotal: %d proxies\n", stats.TotalProxies))
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(buf.String()))
 }
 
 func (h *ProxyHandler) handleForwardProxy(w http.ResponseWriter, r *http.Request) {

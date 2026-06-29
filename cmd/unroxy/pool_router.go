@@ -112,6 +112,40 @@ func (r *PoolRouter) PoolCount() int {
 	return total
 }
 
+type PoolInfo struct {
+	Name       string
+	ProxyCount int
+}
+
+type SystemStats struct {
+	Pools        []PoolInfo
+	TotalProxies int
+}
+
+func (r *PoolRouter) Stats() SystemStats {
+	if r == nil {
+		return SystemStats{}
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	pools := make([]PoolInfo, 0, len(r.pools))
+	total := 0
+	for _, p := range r.pools {
+		if strings.HasPrefix(strings.ToUpper(p.Name), "WARP") {
+			continue
+		}
+		count := 0
+		if p.Pool != nil {
+			count = p.Pool.Count()
+		}
+		pools = append(pools, PoolInfo{Name: p.Name, ProxyCount: count})
+		total += count
+	}
+	return SystemStats{Pools: pools, TotalProxies: total}
+}
+
 func AuthUsername(r *http.Request) string {
 	user, _, ok := r.BasicAuth()
 	if ok {

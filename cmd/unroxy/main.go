@@ -25,9 +25,6 @@ func main() {
 	handler := NewProxyHandler(logger, router)
 
 	logger.Printf("Unroxy running on :%s", port)
-	logger.Printf("Rewrite proxy:  http://localhost:%s/{domain}/{path}", port)
-	logger.Printf("Forward proxy:  curl -x http://localhost:%s http://example.com", port)
-	logger.Printf("CONNECT tunnel: curl -x http://localhost:%s https://example.com", port)
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		logger.Fatalf("Server failed: %v", err)
