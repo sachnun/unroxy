@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -22,7 +23,7 @@ func main() {
 		initWarpAsync(router, logger)
 	}
 
-	handler := NewProxyHandler(logger, router)
+	handler := NewProxyHandler(logger, router, os.Getenv("TCP"))
 
 	logger.Printf("Unroxy running on :%s", port)
 

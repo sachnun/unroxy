@@ -10,7 +10,7 @@ import (
 )
 
 func TestProxyHandler_ServeHTTP_InvalidPath(t *testing.T) {
-	h := NewProxyHandler(nil, nil)
+	h := NewProxyHandler(nil, nil, "")
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
 
@@ -77,7 +77,7 @@ func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewProxyHandler(nil, mock)
+			h := NewProxyHandler(nil, mock, "")
 			req := tt.buildReq()
 			w := httptest.NewRecorder()
 
@@ -93,7 +93,7 @@ func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
 func TestProxyHandler_ForwardProxy_UnsupportedScheme(t *testing.T) {
 	h := NewProxyHandler(nil, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
-	}))
+	}), "")
 
 	req := httptest.NewRequest(http.MethodGet, "ftp://example.com/path", nil)
 	w := httptest.NewRecorder()
@@ -118,6 +118,7 @@ func TestProxyHandler_ForwardProxy_ForwardsRequest(t *testing.T) {
 				Request:    req,
 			}, nil
 		}),
+		"",
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/search?q=hello", nil)
@@ -144,7 +145,7 @@ func TestProxyHandler_ForwardProxy_ForwardsRequest(t *testing.T) {
 }
 
 func TestProxyHandler_ConnectTunnel_NoRotatingTransport(t *testing.T) {
-	h := NewProxyHandler(nil, nil)
+	h := NewProxyHandler(nil, nil, "")
 	req := httptest.NewRequest(http.MethodConnect, "http://proxy.local/example.com:443", nil)
 	w := httptest.NewRecorder()
 
@@ -168,6 +169,7 @@ func TestProxyHandler_RewriteProxy_Preserved(t *testing.T) {
 				Request:    req,
 			}, nil
 		}),
+		"",
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/example.com/path", nil)
@@ -194,7 +196,7 @@ func TestProxyHandler_RewriteProxy_Preserved(t *testing.T) {
 }
 
 func TestNewProxyHandler(t *testing.T) {
-	h := NewProxyHandler(nil, nil)
+	h := NewProxyHandler(nil, nil, "")
 
 	if h == nil {
 		t.Error("Expected non-nil handler")
@@ -226,7 +228,7 @@ func TestProxyHandlerDoesNotLogRequestDetails(t *testing.T) {
 			Header:     make(http.Header),
 			Request:    req,
 		}, nil
-	}))
+	}), "")
 
 	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/example.com/search?q=hello", nil)
 	w := httptest.NewRecorder()

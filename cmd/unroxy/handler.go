@@ -26,9 +26,10 @@ type ProxyHandler struct {
 	logger       *log.Logger
 	transport    http.RoundTripper
 	router       *PoolRouter
+	tcpProxy     string
 }
 
-func NewProxyHandler(logger *log.Logger, transportOrRouter interface{}) *ProxyHandler {
+func NewProxyHandler(logger *log.Logger, transportOrRouter interface{}, tcpProxy string) *ProxyHandler {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -47,6 +48,8 @@ func NewProxyHandler(logger *log.Logger, transportOrRouter interface{}) *ProxyHa
 	case http.RoundTripper:
 		h.transport = v
 	}
+
+	h.tcpProxy = tcpProxy
 
 	return h
 }
@@ -103,11 +106,17 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 	buf.WriteString(fmt.Sprintf("  Rewrite   /example.com/path\n"))
 	buf.WriteString(fmt.Sprintf("            curl http://%s/example.com\n", r.Host))
 	buf.WriteString(fmt.Sprintf("\n  Proxy     curl -x http://%s http://example.com\n", r.Host))
-	buf.WriteString(fmt.Sprintf("            curl -x http://%s https://example.com\n", r.Host))
+	if h.tcpProxy != "" {
+		buf.WriteString(fmt.Sprintf("            curl -x http://%s https://example.com\n", h.tcpProxy))
+	}
 	buf.WriteString(fmt.Sprintf("\n  Region    curl http://%s/us/example.com\n", r.Host))
-	buf.WriteString(fmt.Sprintf("            curl -x http://us@%s https://example.com\n", r.Host))
+	if h.tcpProxy != "" {
+		buf.WriteString(fmt.Sprintf("            curl -x http://us@%s https://example.com\n", h.tcpProxy))
+	}
 	buf.WriteString(fmt.Sprintf("\n  WARP      curl http://%s/warp/example.com\n", r.Host))
-	buf.WriteString(fmt.Sprintf("            curl -x http://warp@%s https://example.com\n", r.Host))
+	if h.tcpProxy != "" {
+		buf.WriteString(fmt.Sprintf("            curl -x http://warp@%s https://example.com\n", h.tcpProxy))
+	}
 
 	if h.router != nil {
 		stats := h.router.Stats()
