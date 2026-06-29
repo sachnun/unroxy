@@ -1,12 +1,5 @@
 package main
 
-import (
-	"encoding/json"
-	"os"
-	"strconv"
-	"time"
-)
-
 func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int, egressRegion string) map[string]interface{} {
 	if minIdle > poolSize {
 		minIdle = poolSize
@@ -28,7 +21,7 @@ func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int, egres
 		"DisableRemoteServerListFetcher": true,
 		"DisableDSLFetcher":              true,
 		"DataRootDirectory":              dataDir,
-		"NetworkID":                      envOrDefault("PSIPHON_NETWORK_ID", "WIFI"),
+		"NetworkID":                      "WIFI",
 		"EmitDiagnosticNotices":          true,
 		"DisableTactics":                 true,
 		"LimitMeekBufferSizes":           false,
@@ -45,39 +38,5 @@ func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int, egres
 		pc["EgressRegion"] = egressRegion
 	}
 
-	if overlay := os.Getenv("PSIPHON_JSON"); overlay != "" {
-		var m map[string]interface{}
-		if json.Unmarshal([]byte(overlay), &m) == nil {
-			for k, v := range m {
-				pc[k] = v
-			}
-		}
-	}
-
 	return pc
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return def
-}
-
-func envDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
 }

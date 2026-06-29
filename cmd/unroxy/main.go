@@ -7,16 +7,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	port := "8080"
 
 	logger := log.Default()
 
@@ -43,7 +39,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 
 	serverCounts := serversByRegion()
 
-	maxPerRegion := envInt("PSIPHON_MAX_PER_REGION", 3)
+	maxPerRegion := 3
 
 	named := make([]*NamedPool, 0)
 	defaultPool := NewProxyPool(logger, nil)

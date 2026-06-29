@@ -73,7 +73,7 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 		allServerEntries = parseServerEntries(embeddedServerList)
 	}
 
-	dataDir := envOrDefault("PSIPHON_DATA_DIR", "/tmp/unroxy-psiphon")
+	dataDir := "/tmp/unroxy-psiphon"
 	if region != "" {
 		dataDir += "-" + region
 	}
@@ -127,7 +127,7 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 
 	go controller.Run(ctx)
 
-	refreshInterval := envDuration("PSIPHON_REFRESH_INTERVAL", 30*time.Minute)
+	refreshInterval := 30 * time.Minute
 	refreshCount := max(1, poolSize/3)
 	d.startTunnelRefresh(ctx, refreshInterval, refreshCount, logger)
 
