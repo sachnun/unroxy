@@ -100,18 +100,31 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 
 	buf.WriteString("Usage\n")
 	buf.WriteString("─────\n")
-	buf.WriteString(fmt.Sprintf("  Rewrite  /example.com/path\n"))
-	buf.WriteString(fmt.Sprintf("           curl http://%s/example.com\n", r.Host))
-	buf.WriteString(fmt.Sprintf("\n  Forward  curl -x http://%s http://example.com\n", r.Host))
-	buf.WriteString(fmt.Sprintf("\n  CONNECT  curl -x http://%s https://example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("  Rewrite   /example.com/path\n"))
+	buf.WriteString(fmt.Sprintf("            curl http://%s/example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  Proxy     curl -x http://%s http://example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("            curl -x http://%s https://example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  Region    curl http://%s/us/example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("            curl -x http://us@%s https://example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  WARP      curl http://%s/warp/example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("            curl -x http://warp@%s https://example.com\n", r.Host))
 
 	if h.router != nil {
 		stats := h.router.Stats()
 		if len(stats.Pools) > 0 {
 			buf.WriteString("\nPools\n")
 			buf.WriteString("─────\n")
-			for _, p := range stats.Pools {
-				buf.WriteString(fmt.Sprintf("  %-10s(%d) → /%s/example.com\n", p.Name, p.ProxyCount, strings.ToLower(p.Name)))
+			const colWidth = 12
+			for i, p := range stats.Pools {
+				entry := fmt.Sprintf("%s(%d)", p.Name, p.ProxyCount)
+				if i%3 == 0 {
+					buf.WriteString(fmt.Sprintf("  %-*s", -colWidth, entry))
+				} else {
+					buf.WriteString(fmt.Sprintf("%-*s", colWidth, entry))
+				}
+				if i%3 == 2 || i == len(stats.Pools)-1 {
+					buf.WriteString("\n")
+				}
 			}
 			buf.WriteString(fmt.Sprintf("\nTotal: %d proxies\n", stats.TotalProxies))
 		}
