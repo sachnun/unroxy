@@ -98,7 +98,7 @@ func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	proxy := h.createProxy(domain, path, query, transport)
+	proxy := h.createProxy(domain, path, query, transport, poolName)
 	proxy.ServeHTTP(w, r)
 }
 
@@ -308,7 +308,12 @@ func (h *ProxyHandler) isResolvable(domain string) bool {
 	return err == nil
 }
 
-func (h *ProxyHandler) createProxy(domain, path, query string, transport http.RoundTripper) *httputil.ReverseProxy {
+func (h *ProxyHandler) createProxy(domain, path, query string, transport http.RoundTripper, poolName string) *httputil.ReverseProxy {
+	proxyBase := ""
+	if poolName != "" {
+		proxyBase = "/" + strings.ToLower(poolName)
+	}
+
 	return &httputil.ReverseProxy{
 		ErrorLog:  log.New(io.Discard, "", 0),
 		Transport: transport,
@@ -325,7 +330,7 @@ func (h *ProxyHandler) createProxy(domain, path, query string, transport http.Ro
 			resp.Header.Set("Pragma", "no-cache")
 			resp.Header.Set("Expires", "0")
 
-			rewriter.RewriteHeaders(resp, domain, "")
+			rewriter.RewriteHeaders(resp, domain, proxyBase)
 
 			contentType := resp.Header.Get("Content-Type")
 			needsRewrite := strings.Contains(contentType, "text/html") ||
@@ -344,11 +349,11 @@ func (h *ProxyHandler) createProxy(domain, path, query string, transport http.Ro
 			var newBody []byte
 			switch {
 			case strings.Contains(contentType, "text/html"):
-				newBody = h.htmlRewriter.Rewrite(body, domain, "")
+				newBody = h.htmlRewriter.Rewrite(body, domain, proxyBase)
 			case strings.Contains(contentType, "text/css"):
-				newBody = h.cssRewriter.Rewrite(body, domain, "")
+				newBody = h.cssRewriter.Rewrite(body, domain, proxyBase)
 			case strings.Contains(contentType, "javascript"):
-				newBody = h.jsRewriter.Rewrite(body, domain, "")
+				newBody = h.jsRewriter.Rewrite(body, domain, proxyBase)
 			default:
 				newBody = body
 			}
