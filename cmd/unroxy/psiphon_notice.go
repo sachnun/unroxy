@@ -30,11 +30,16 @@ func initPsiphonNoticeHandler(logger *log.Logger) {
 
 		if msg.Type == "ActiveTunnel" {
 			if entry, ok := allServerEntries[msg.Data.DiagnosticID]; ok {
-				if d, ok := regionDialers[entry.region]; ok {
+				regionDialersMu.Lock()
+				d, ok := regionDialers[entry.region]
+				if ok {
 					n := d.tunnelReady.Add(1)
+					regionDialersMu.Unlock()
 					if int(n) == d.targetPool {
 						logger.Printf("Psiphon [%s]: %d/%d tunnels ready", entry.region, n, d.targetPool)
 					}
+				} else {
+					regionDialersMu.Unlock()
 				}
 			}
 		}

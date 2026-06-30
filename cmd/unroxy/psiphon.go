@@ -92,7 +92,9 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 		serverEntries: allServerEntries,
 	}
 
+	regionDialersMu.Lock()
 	regionDialers[region] = d
+	regionDialersMu.Unlock()
 
 	pc := buildPsiphonConfig(dataDir, poolSize, minIdle, maxTunnels, region)
 	configJSON, _ := json.Marshal(pc)

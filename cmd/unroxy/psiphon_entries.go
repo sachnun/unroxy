@@ -26,6 +26,7 @@ var (
 	allServerEntries  map[string]serverEntryInfo
 	protocolByIP      sync.Map
 	regionDialers     = make(map[string]*PsiphonDialer)
+	regionDialersMu   sync.Mutex
 	globalHostTunnels sync.Map
 )
 
