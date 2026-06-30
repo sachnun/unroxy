@@ -16,7 +16,7 @@ import (
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
 )
 
-//go:embed server_entries.txt
+//go:embed data/server_entries.txt
 var embeddedServerList string
 
 var errPsiphonNotReady = errors.New("psiphon not ready")

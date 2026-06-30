@@ -19,7 +19,7 @@ RUN apk --no-cache add ca-certificates curl
 WORKDIR /root/
 COPY --from=builder /out/unroxy ./unroxy
 COPY --from=usque-fetcher /out/usque ./usque
-COPY usque-config.json /tmp/config.json
+COPY cmd/unroxy/data/usque-config.json /tmp/config.json
 RUN chmod +x ./usque
 EXPOSE 8080
 CMD ["./unroxy"]
