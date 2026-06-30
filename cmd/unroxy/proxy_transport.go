@@ -75,8 +75,20 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		var err error
 
 		if candidate.dialContext != nil {
-			v, _ := t.dialTransports.LoadOrStore(candidate.key, newUTLSTransport(candidate.dialContext))
-			resp, err = v.(*http.Transport).RoundTrip(attemptReq)
+			if isPsiphonCandidate(candidate) {
+				v, _ := t.dialTransports.LoadOrStore(candidate.key, &http.Transport{
+					DialContext:           candidate.dialContext,
+					ForceAttemptHTTP2:     false,
+					MaxIdleConns:          10,
+					IdleConnTimeout:       90 * time.Second,
+					TLSHandshakeTimeout:   10 * time.Second,
+					ResponseHeaderTimeout: proxyHeaderTimeout,
+				})
+				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
+			} else {
+				v, _ := t.dialTransports.LoadOrStore(candidate.key, newUTLSTransport(candidate.dialContext))
+				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
+			}
 		} else {
 			resp, err = t.transport.RoundTrip(attemptReq)
 		}
