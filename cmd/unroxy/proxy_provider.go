@@ -45,7 +45,7 @@ type proxiflyProvider struct{}
 func (p *proxiflyProvider) Name() string { return "Proxifly" }
 
 func (p *proxiflyProvider) ETag() (string, error) {
-	client := &http.Client{Timeout: providerFetchTimeout}
+	client := newProviderHTTPClient()
 	req, err := http.NewRequest(http.MethodHead, proxiflyCSVURL, nil)
 	if err != nil {
 		return "", err
@@ -67,7 +67,7 @@ func (p *proxiflyProvider) Fetch() ([]*proxyState, error) {
 }
 
 func fetchProxiflyProxies() ([]*proxyState, error) {
-	client := &http.Client{Timeout: providerFetchTimeout}
+	client := newProviderHTTPClient()
 
 	resp, err := client.Get(proxiflyCSVURL)
 	if err != nil {

@@ -166,15 +166,10 @@ func initWarpRegional(router *PoolRouter, logger *log.Logger) {
 		}
 		_ = rU
 
-		rWt := &http.Transport{
-			DialContext:           rDialer.DialContext,
-			ForceAttemptHTTP2:     false,
-			MaxIdleConns:          50,
-			MaxIdleConnsPerHost:   5,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 20 * time.Second,
-		}
+		rWt := newUTLSTransport(rDialer.DialContext)
+		rWt.MaxIdleConns = 50
+		rWt.MaxIdleConnsPerHost = 5
+		rWt.ResponseHeaderTimeout = 20 * time.Second
 
 		rTransport := NewRotatingProxyTransport(nil)
 		rTransport.SetWarpTransport(rWt)
@@ -211,15 +206,10 @@ func initWarpRegional(router *PoolRouter, logger *log.Logger) {
 		}
 		_ = rU
 
-		rWt := &http.Transport{
-			DialContext:           rDialer.DialContext,
-			ForceAttemptHTTP2:     false,
-			MaxIdleConns:          50,
-			MaxIdleConnsPerHost:   5,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 20 * time.Second,
-		}
+		rWt := newUTLSTransport(rDialer.DialContext)
+		rWt.MaxIdleConns = 50
+		rWt.MaxIdleConnsPerHost = 5
+		rWt.ResponseHeaderTimeout = 20 * time.Second
 
 		rTransport := NewRotatingProxyTransport(nil)
 		rTransport.SetWarpTransport(rWt)
@@ -252,15 +242,10 @@ func initWarpUsque(logger *log.Logger) []*NamedPool {
 	}
 	_ = u
 
-	wt := &http.Transport{
-		DialContext:           dialer.DialContext,
-		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 20 * time.Second,
-	}
+	wt := newUTLSTransport(dialer.DialContext)
+	wt.MaxIdleConns = 100
+	wt.MaxIdleConnsPerHost = 10
+	wt.ResponseHeaderTimeout = 20 * time.Second
 
 	warpTransport := NewRotatingProxyTransport(nil)
 	warpTransport.SetWarpTransport(wt)

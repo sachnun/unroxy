@@ -51,6 +51,10 @@ func NewProxyHandler(logger *log.Logger, transportOrRouter interface{}, tcpProxy
 
 	h.tcpProxy = tcpProxy
 
+	if h.transport != nil {
+		h.transport = NewCFRetryTransport(h.transport, h.logger)
+	}
+
 	return h
 }
 
@@ -69,7 +73,7 @@ func (h *ProxyHandler) resolveTransport(r *http.Request) http.RoundTripper {
 	username := AuthUsername(r)
 	if username != "" && h.router != nil {
 		if transport := h.router.Select(username); transport != nil {
-			return transport
+			return NewCFRetryTransport(transport, h.logger)
 		}
 	}
 	return h.transport
@@ -90,7 +94,7 @@ func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request
 	transport := h.transport
 	if poolName != "" && h.router != nil {
 		if t := h.router.Select(poolName); t != nil {
-			transport = t
+			transport = NewCFRetryTransport(t, h.logger)
 		}
 	}
 

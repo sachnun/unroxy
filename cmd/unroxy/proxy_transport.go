@@ -75,14 +75,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		var err error
 
 		if candidate.dialContext != nil {
-			v, _ := t.dialTransports.LoadOrStore(candidate.key, &http.Transport{
-				DialContext:           candidate.dialContext,
-				ForceAttemptHTTP2:     false,
-				MaxIdleConns:          10,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: proxyHeaderTimeout,
-			})
+			v, _ := t.dialTransports.LoadOrStore(candidate.key, newUTLSTransport(candidate.dialContext))
 			resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 		} else {
 			resp, err = t.transport.RoundTrip(attemptReq)
@@ -252,21 +245,7 @@ func newProxyAwareTransport() http.RoundTripper {
 		KeepAlive: 30 * time.Second,
 	}
 
-	return &http.Transport{
-		Proxy: func(req *http.Request) (*url.URL, error) {
-			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
-			return proxyURL, nil
-		},
-		DialContext:           dialer.DialContext,
-		DisableKeepAlives:     false,
-		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: proxyHeaderTimeout,
-		ExpectContinueTimeout: time.Second,
-	}
+	return newUTLSTransport(dialer.DialContext)
 }
 
 func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
