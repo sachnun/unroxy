@@ -7,10 +7,10 @@ require (
 	github.com/bogdanfinn/fhttp v0.6.8
 	github.com/bogdanfinn/tls-client v1.11.2
 	github.com/iancoleman/orderedmap v0.3.0
-	github.com/refraction-networking/utls v1.3.3
+	github.com/refraction-networking/utls v1.8.2
 	github.com/t14raptor/go-fast v0.0.4
 	github.com/tdewolff/parse/v2 v2.8.13
-	golang.org/x/net v0.55.0
+	golang.org/x/net v0.57.0
 	h12.io/socks v1.0.3
 )
 
@@ -30,7 +30,7 @@ require (
 	github.com/Psiphon-Labs/quic-go v0.0.0-20250527153145-79fe45fb83b1 // indirect
 	github.com/Psiphon-Labs/utls v1.1.1-0.20260602140907-e3b959a8340b // indirect
 	github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa // indirect
-	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/armon/go-proxyproto v0.0.0-20180202201750-5b7edb60ff5f // indirect
 	github.com/axiomhq/hyperloglog v0.2.6 // indirect
 	github.com/bifurcation/mint v0.0.0-20180306135233-198357931e61 // indirect
@@ -49,7 +49,6 @@ require (
 	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
 	github.com/flynn/noise v1.0.1-0.20220214164934-d803f5c4b0f4 // indirect
 	github.com/fxamacker/cbor/v2 v2.5.0 // indirect
-	github.com/gaukas/godicttls v0.0.4 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
@@ -60,7 +59,7 @@ require (
 	github.com/josharian/native v1.1.1-0.20230202152459-5c7d0dd6ab86 // indirect
 	github.com/jsimonetti/rtnetlink v1.3.5 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
-	github.com/klauspost/compress v1.18.2 // indirect
+	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/libp2p/go-reuseport v0.4.0 // indirect
 	github.com/marusama/semaphore v0.0.0-20171214154724-565ffd8e868a // indirect
 	github.com/mdlayher/netlink v1.7.2 // indirect
@@ -106,17 +105,17 @@ require (
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib v1.5.0 // indirect
-	go.uber.org/mock v0.5.2 // indirect
+	go.uber.org/mock v0.5.0 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
 	go4.org/netipx v0.0.0-20230824141953-6213f710f925 // indirect
-	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20240110193028-0dcbfd608b1e // indirect
-	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.10.0 // indirect
-	golang.org/x/tools v0.44.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20230325221338-052af4a8072b // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
