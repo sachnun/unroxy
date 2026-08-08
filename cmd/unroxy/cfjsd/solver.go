@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -21,7 +20,6 @@ type OneshotSolver struct {
 	client     tls_client.HttpClient
 	targetURL  string
 	scriptURL  string
-	debug      bool
 	lzAlphabet string
 }
 
@@ -39,7 +37,7 @@ type SolveData struct {
 	Cookies   []*http.Cookie
 }
 
-func NewSolver(targetURL string, debug bool) (*OneshotSolver, error) {
+func NewSolver(targetURL string) (*OneshotSolver, error) {
 	client, err := BuildClient(ClientConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tls client: %w", err)
@@ -48,15 +46,6 @@ func NewSolver(targetURL string, debug bool) (*OneshotSolver, error) {
 	return &OneshotSolver{
 		client:    client,
 		targetURL: strings.TrimSuffix(targetURL, "/"),
-		debug:     debug,
-	}, nil
-}
-
-func NewSolverWithClient(client tls_client.HttpClient, targetURL string, debug bool) (*OneshotSolver, error) {
-	return &OneshotSolver{
-		client:    client,
-		targetURL: strings.TrimSuffix(targetURL, "/"),
-		debug:     debug,
 	}, nil
 }
 
@@ -64,49 +53,6 @@ func (s *OneshotSolver) ensureScriptURL() {
 	if s.scriptURL == "" {
 		s.scriptURL = fmt.Sprintf("%s/cdn-cgi/challenge-platform/scripts/jsd/main.js", originFromURL(s.targetURL))
 	}
-}
-
-func (s *OneshotSolver) Solve() (*SolveResult, error) {
-	s.ensureScriptURL()
-
-	var (
-		params      *ChallengeParams
-		pageCookies []*http.Cookie
-		pageErr     error
-
-		sitekey, path, lzAlphabet string
-		scriptErr                 error
-
-		wg sync.WaitGroup
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		params, pageCookies, pageErr = s.fetchChallengeParams()
-	}()
-	go func() {
-		defer wg.Done()
-		sitekey, path, lzAlphabet, scriptErr = s.loadScript()
-	}()
-	wg.Wait()
-
-	if pageErr != nil {
-		return nil, fmt.Errorf("failed to fetch challenge params: %w", pageErr)
-	}
-	if scriptErr != nil {
-		return nil, fmt.Errorf("failed to parse script: %w", scriptErr)
-	}
-
-	params.Sitekey = sitekey
-	params.Path = path
-	s.lzAlphabet = lzAlphabet
-
-	result, err := s.sendOneshot(params, pageCookies)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send oneshot: %w", err)
-	}
-
-	return result, nil
 }
 
 func (s *OneshotSolver) SolveFromData(data SolveData) (*SolveResult, error) {
@@ -142,62 +88,6 @@ type SolveResult struct {
 	Cookies     []*http.Cookie
 	Headers     http.Header
 	CfClearance string
-}
-
-func (s *OneshotSolver) fetchChallengeParams() (*ChallengeParams, []*http.Cookie, error) {
-	req, err := http.NewRequest("GET", s.targetURL, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	s.setHeaders(req)
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	bodyStr := string(body)
-
-	params := &ChallengeParams{}
-
-	cfParamsRe := regexp.MustCompile(`__CF\$cv\$params\s*=\s*\{([^}]*(?:r\s*:\s*['"][^'"]*['"])[^}]*)\}`)
-	cfMatch := cfParamsRe.FindStringSubmatch(bodyStr)
-
-	var paramsBlock string
-	if len(cfMatch) > 1 {
-		paramsBlock = cfMatch[1]
-	} else {
-		lineRe := regexp.MustCompile(`__CF\$cv\$params\s*=\s*\{[^}]+\}`)
-		lineMatch := lineRe.FindString(bodyStr)
-		if lineMatch != "" {
-			paramsBlock = lineMatch
-		} else {
-			return nil, nil, fmt.Errorf("could not find __CF$cv$params block in response")
-		}
-	}
-
-	rRe := regexp.MustCompile(`\br\s*:\s*['"]([a-fA-F0-9]+)['"]`)
-	if m := rRe.FindStringSubmatch(paramsBlock); len(m) > 1 {
-		params.R = m[1]
-	}
-
-	tRe := regexp.MustCompile(`\bt\s*:\s*['"]([A-Za-z0-9+/=]+)['"]`)
-	if m := tRe.FindStringSubmatch(paramsBlock); len(m) > 1 {
-		params.T = m[1]
-	}
-
-	if params.R == "" || params.T == "" {
-		return nil, nil, fmt.Errorf("could not find __CF$cv$params in response (r=%s, t=%s, block=%s)", params.R, params.T, paramsBlock)
-	}
-
-	return params, resp.Cookies(), nil
 }
 
 func (s *OneshotSolver) loadScript() (sitekey, path, lzAlphabet string, err error) {
@@ -382,40 +272,6 @@ func (s *OneshotSolver) sendOneshot(params *ChallengeParams, cookies []*http.Coo
 	return result, nil
 }
 
-func (s *OneshotSolver) setHeaders(req *http.Request) {
-	req.Header = http.Header{
-		"sec-ch-ua":                 {`"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"`},
-		"sec-ch-ua-mobile":          {"?0"},
-		"sec-ch-ua-platform":        {`"Windows"`},
-		"upgrade-insecure-requests": {"1"},
-		"user-agent":                {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"},
-		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
-		"sec-fetch-site":            {"none"},
-		"sec-fetch-mode":            {"navigate"},
-		"sec-fetch-user":            {"?1"},
-		"sec-fetch-dest":            {"document"},
-		"accept-encoding":           {"gzip, deflate, br, zstd"},
-		"accept-language":           {"en-US,en;q=0.9"},
-		"priority":                  {"u=0, i"},
-		http.HeaderOrderKey: {
-			"sec-ch-ua",
-			"sec-ch-ua-mobile",
-			"sec-ch-ua-platform",
-			"upgrade-insecure-requests",
-			"user-agent",
-			"accept",
-			"sec-fetch-site",
-			"sec-fetch-mode",
-			"sec-fetch-user",
-			"sec-fetch-dest",
-			"accept-encoding",
-			"accept-language",
-			"cookie",
-			"priority",
-		},
-	}
-}
-
 func originFromURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -441,10 +297,6 @@ func deobfuscateScript(src string) (string, *DeobfuscateResult, error) {
 	code := fastgen.Generate(prog)
 	return code, result, nil
 }
-
-const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-
-const DefaultProfile = "chrome_146"
 
 type ClientConfig struct {
 	Proxy string

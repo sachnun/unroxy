@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -90,14 +89,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 			logger.Printf("Psiphon [%s] init failed: %v", r.region, r.err)
 			continue
 		}
-		ps := &proxyState{
-			key:         "psiphon://" + r.region,
-			url:         &url.URL{Scheme: "psiphon", Host: r.region},
-			dialContext: r.dialer.DialContext,
-			country:     r.region,
-			psiphon:     r.dialer,
-		}
-		defaultPool.SetPrimary(ps)
+		defaultPool.SetPrimary(newPsiphonProxyState(r.dialer))
 	}
 
 	proxiflyWg.Wait()
@@ -113,29 +105,14 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 		logger.Printf("Proxifly: %d proxies", len(allProxies))
 		defaultPool.Replace(allProxies)
 		for _, dialer := range regionDialers {
-			ps := &proxyState{
-				key:         "psiphon://" + dialer.region,
-				url:         &url.URL{Scheme: "psiphon", Host: dialer.region},
-				dialContext: dialer.DialContext,
-				country:     dialer.region,
-				psiphon:     dialer,
-			}
-			defaultPool.SetPrimary(ps)
+			defaultPool.SetPrimary(newPsiphonProxyState(dialer))
 		}
 	}
 
 	if countryPools != nil {
 		for country, pool := range countryPools {
-			dialer, ok := regionDialers[country]
-			if ok {
-				ps := &proxyState{
-					key:         "psiphon://" + country,
-					url:         &url.URL{Scheme: "psiphon", Host: country},
-					dialContext: dialer.DialContext,
-					country:     country,
-					psiphon:     dialer,
-				}
-				pool.SetPrimary(ps)
+			if dialer, ok := regionDialers[country]; ok {
+				pool.SetPrimary(newPsiphonProxyState(dialer))
 			}
 			transport := NewRotatingProxyTransport(pool)
 			named = append(named, &NamedPool{
@@ -161,14 +138,7 @@ func newCountryPoolRouter(logger *log.Logger) *PoolRouter {
 
 	readdPsiphon := func() {
 		for _, dialer := range regionDialers {
-			ps := &proxyState{
-				key:         "psiphon://" + dialer.region,
-				url:         &url.URL{Scheme: "psiphon", Host: dialer.region},
-				dialContext: dialer.DialContext,
-				country:     dialer.region,
-				psiphon:     dialer,
-			}
-			defaultPool.SetPrimary(ps)
+			defaultPool.SetPrimary(newPsiphonProxyState(dialer))
 		}
 	}
 

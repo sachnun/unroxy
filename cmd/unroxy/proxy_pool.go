@@ -73,7 +73,16 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	}
 
 	rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
-	failedKeys := p.failedByHost[rotationKey]
+
+	// Snapshot the failed set: the shared failedByHost map is never
+	// mutated while holding only the read lock (concurrent deletes would
+	// race and can panic "concurrent map writes").
+	failedSet := make(map[string]bool, len(p.failedByHost[rotationKey]))
+	for key, failedAt := range p.failedByHost[rotationKey] {
+		if time.Since(failedAt) < failureTTL {
+			failedSet[key] = true
+		}
+	}
 
 	ready := make([]proxyCandidate, 0, len(p.proxies))
 	failed := make([]proxyCandidate, 0, len(p.proxies))
@@ -93,10 +102,9 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 			psiphon:     state.psiphon,
 		}
 
-		if failedAt, isFailed := failedKeys[state.key]; isFailed && time.Since(failedAt) < failureTTL {
+		if failedSet[state.key] {
 			failed = append(failed, candidate)
 		} else {
-			delete(failedKeys, state.key)
 			ready = append(ready, candidate)
 		}
 	}

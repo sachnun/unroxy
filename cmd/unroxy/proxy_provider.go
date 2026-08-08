@@ -212,13 +212,7 @@ func startProxyRefresh(providers []ProxyProvider, countryPools map[string]*Proxy
 					if pool, ok := countryPools[country]; ok {
 						pool.Replace(states)
 						if countryDialer, ok := regionDialers[country]; ok {
-							pool.SetPrimary(&proxyState{
-								key:         "psiphon://" + country,
-								url:         &url.URL{Scheme: "psiphon", Host: country},
-								dialContext: countryDialer.DialContext,
-								country:     country,
-								psiphon:     countryDialer,
-							})
+							pool.SetPrimary(newPsiphonProxyState(countryDialer))
 						}
 					}
 				}

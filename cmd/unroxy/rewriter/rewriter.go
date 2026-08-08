@@ -58,5 +58,3 @@ func ToProxyURL(rawURL, domain, proxyBase string) string {
 
 	return rawURL
 }
-
-

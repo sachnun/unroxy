@@ -10,7 +10,6 @@ import (
 type NamedPool struct {
 	Name      string
 	Username  string
-	Password  string
 	Pool      *ProxyPool
 	Transport *RotatingProxyTransport
 }
@@ -109,22 +108,6 @@ func (r *PoolRouter) Names() []string {
 		names = append(names, p.Name)
 	}
 	return names
-}
-
-func (r *PoolRouter) PoolCount() int {
-	if r == nil {
-		return 0
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	total := 0
-	for _, p := range r.pools {
-		if p.Pool != nil {
-			total += p.Pool.Count()
-		}
-	}
-	return total
 }
 
 type PoolInfo struct {

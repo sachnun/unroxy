@@ -73,5 +73,3 @@ func TestToProxyURL_WithProxyBase(t *testing.T) {
 		})
 	}
 }
-
-

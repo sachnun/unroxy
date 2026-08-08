@@ -7,9 +7,9 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,9 +25,7 @@ const psiphonRetryCount = 3
 
 type PsiphonDialer struct {
 	controller  *psiphon.Controller
-	ctx         context.Context
 	cancel      context.CancelFunc
-	once        sync.Once
 	tunnelReady atomic.Int32
 	targetPool  int
 	region      string
@@ -41,6 +39,19 @@ func TunnelInfoForHost(host string) *tunnelInfo {
 		return nil
 	}
 	return v.(*tunnelInfo)
+}
+
+func newPsiphonProxyState(d *PsiphonDialer) *proxyState {
+	if d == nil {
+		return nil
+	}
+	return &proxyState{
+		key:         "psiphon://" + d.region,
+		url:         &url.URL{Scheme: "psiphon", Host: d.region},
+		dialContext: d.DialContext,
+		country:     d.region,
+		psiphon:     d,
+	}
 }
 
 func serverIDFromConn(conn net.Conn) string {
@@ -111,7 +122,6 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d.ctx = ctx
 	d.cancel = cancel
 
 	if embeddedServerList != "" {
@@ -164,10 +174,6 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 		lastErr = err
 	}
 	return nil, lastErr
-}
-
-func (d *PsiphonDialer) Close() {
-	d.once.Do(func() { d.cancel() })
 }
 
 func (d *PsiphonDialer) startTunnelRefresh(ctx context.Context, interval time.Duration, count int, logger *log.Logger) {

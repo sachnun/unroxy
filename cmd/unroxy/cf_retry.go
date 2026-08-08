@@ -107,7 +107,7 @@ func extractCFParams(body []byte) *cfChallengeParams {
 }
 
 func (t *CFRetryTransport) solveChallenge(targetURL string, params *cfChallengeParams) (string, error) {
-	s, err := solver.NewSolver(targetURL, false)
+	s, err := solver.NewSolver(targetURL)
 	if err != nil {
 		return "", fmt.Errorf("jsd init: %w", err)
 	}

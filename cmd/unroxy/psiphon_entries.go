@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"sort"
 	"strings"
 	"sync"
 
@@ -73,35 +71,4 @@ func serversByRegion() map[string]int {
 		}
 	}
 	return counts
-}
-
-func formatRegionSummary(regionCount map[string]int) string {
-	type kv struct {
-		region string
-		count  int
-	}
-	sorted := make([]kv, 0, len(regionCount))
-	for r, c := range regionCount {
-		sorted = append(sorted, kv{r, c})
-	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].count > sorted[j].count })
-	parts := make([]string, len(sorted))
-	for i, kv := range sorted {
-		parts[i] = fmt.Sprintf("%s(%d)", kv.region, kv.count)
-	}
-	return strings.Join(parts, ", ")
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

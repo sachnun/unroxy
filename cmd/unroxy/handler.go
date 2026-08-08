@@ -86,7 +86,7 @@ func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !h.isResolvable(domain) {
+	if !isResolvable(domain) {
 		http.NotFound(w, r)
 		return
 	}
@@ -306,11 +306,70 @@ func isValidDomain(s string) bool {
 	return true
 }
 
-func (h *ProxyHandler) isResolvable(domain string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+type dnsEntry struct {
+	ok bool
+	at time.Time
+}
+
+// resolvCache caches LookupHost results for the rewrite path. isResolvable
+// previously did one blocking DNS lookup per request (2s timeout) — at high
+// QPS that doubles as a per-request latency tax and resolver load spike.
+// Positive results are cached 60s, negatives 10s so a transient failure is
+// retried quickly. The map is capped and old entries purged on insert.
+var resolvCache = struct {
+	mu      sync.Mutex
+	entries map[string]dnsEntry
+	max     int
+	ttlOK   time.Duration
+	ttlFail time.Duration
+}{
+	entries: make(map[string]dnsEntry, 1024),
+	max:     4096,
+	ttlOK:   60 * time.Second,
+	ttlFail: 10 * time.Second,
+}
+
+const dnsLookupTimeout = 2 * time.Second
+
+func isResolvable(domain string) bool {
+	resolvCache.mu.Lock()
+	if e, ok := resolvCache.entries[domain]; ok {
+		ttl := resolvCache.ttlOK
+		if !e.ok {
+			ttl = resolvCache.ttlFail
+		}
+		if time.Since(e.at) < ttl {
+			resolvCache.mu.Unlock()
+			return e.ok
+		}
+		delete(resolvCache.entries, domain)
+	}
+	resolvCache.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
 	defer cancel()
 	_, err := net.DefaultResolver.LookupHost(ctx, domain)
-	return err == nil
+	resolved := err == nil
+
+	resolvCache.mu.Lock()
+	if len(resolvCache.entries) >= resolvCache.max {
+		now := time.Now()
+		for k, e := range resolvCache.entries {
+			ttl := resolvCache.ttlOK
+			if !e.ok {
+				ttl = resolvCache.ttlFail
+			}
+			if now.Sub(e.at) >= ttl {
+				delete(resolvCache.entries, k)
+			}
+		}
+		if len(resolvCache.entries) >= resolvCache.max {
+			clear(resolvCache.entries)
+		}
+	}
+	resolvCache.entries[domain] = dnsEntry{ok: resolved, at: time.Now()}
+	resolvCache.mu.Unlock()
+	return resolved
 }
 
 func (h *ProxyHandler) createProxy(domain, path, query string, transport http.RoundTripper, poolName string) *httputil.ReverseProxy {
