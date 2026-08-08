@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProxyHandler_ServeHTTP_InvalidPath(t *testing.T) {
@@ -141,6 +146,67 @@ func TestProxyHandler_ForwardProxy_ForwardsRequest(t *testing.T) {
 	}
 	if gotReq.URL.Path != "/search" {
 		t.Errorf("Expected path /search, got %s", gotReq.URL.Path)
+	}
+}
+
+func TestProxyHandler_ConnectTunnel_CFWrappedTransport(t *testing.T) {
+	serverEnd, clientEnd := net.Pipe()
+	defer clientEnd.Close()
+
+	pool := NewProxyPool(nil, []*proxyState{{
+		key: "test",
+		url: &url.URL{Scheme: "http", Host: "127.0.0.1:1"},
+		dialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return serverEnd, nil
+		},
+	}})
+	defaultTransport := NewRotatingProxyTransport(pool)
+	router := NewPoolRouter(nil, defaultTransport)
+	h := NewProxyHandler(log.New(io.Discard, "", 0), router, "")
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	rawAddr := strings.TrimPrefix(srv.URL, "http://")
+	conn, err := net.Dial("tcp", rawAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	if _, err := conn.Write([]byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(clientEnd, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ping" {
+		t.Fatalf("expected ping, got %q", got)
+	}
+
+	if _, err := clientEnd.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	got2 := make([]byte, 4)
+	if _, err := io.ReadFull(conn, got2); err != nil {
+		t.Fatal(err)
+	}
+	if string(got2) != "pong" {
+		t.Fatalf("expected pong, got %q", got2)
 	}
 }
 

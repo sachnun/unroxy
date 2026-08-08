@@ -181,6 +181,11 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 
 	transport := h.resolveTransport(r)
 	rt, ok := transport.(*RotatingProxyTransport)
+	if !ok {
+		if cr, isCF := transport.(*CFRetryTransport); isCF {
+			rt, ok = cr.base.(*RotatingProxyTransport)
+		}
+	}
 	if !ok || rt == nil {
 		http.Error(w, "Transport not available", http.StatusInternalServerError)
 		return
