@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	solver "unroxy/cmd/unroxy/cfjsd"
+	solver "unroxy/internal/core/cfjsd"
 )
 
 type CFRetryTransport struct {

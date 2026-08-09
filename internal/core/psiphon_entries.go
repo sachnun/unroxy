@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"encoding/hex"
@@ -71,4 +71,28 @@ func serversByRegion() map[string]int {
 		}
 	}
 	return counts
+}
+
+// PsiphonDialers returns a snapshot of all registered region dialers.
+func PsiphonDialers() map[string]*PsiphonDialer {
+	regionDialersMu.Lock()
+	defer regionDialersMu.Unlock()
+	snapshot := make(map[string]*PsiphonDialer, len(regionDialers))
+	for region, d := range regionDialers {
+		snapshot[region] = d
+	}
+	return snapshot
+}
+
+// EnsureServerEntries parses the embedded server list once, if needed.
+func EnsureServerEntries() {
+	if allServerEntries == nil {
+		allServerEntries = parseServerEntries(embeddedServerList)
+	}
+}
+
+// ServersByRegion counts embedded server entries per region.
+func ServersByRegion() map[string]int {
+	EnsureServerEntries()
+	return serversByRegion()
 }

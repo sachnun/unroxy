@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bufio"
@@ -153,10 +153,10 @@ func TestProxyHandler_ConnectTunnel_CFWrappedTransport(t *testing.T) {
 	serverEnd, clientEnd := net.Pipe()
 	defer clientEnd.Close()
 
-	pool := NewProxyPool(nil, []*proxyState{{
-		key: "test",
-		url: &url.URL{Scheme: "http", Host: "127.0.0.1:1"},
-		dialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+	pool := NewProxyPool(nil, []*ProxyState{{
+		Key: "test",
+		URL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return serverEnd, nil
 		},
 	}})

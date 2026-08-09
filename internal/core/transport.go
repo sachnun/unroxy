@@ -1,8 +1,10 @@
-package main
+package core
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -56,7 +58,7 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byte, hasBody bool, targetHost string) (*http.Response, error) {
 	if t.pool == nil {
-		return nil, errNoUpstreamProxy
+		return nil, ErrNoUpstreamProxy
 	}
 
 	logger := t.transportLogger()
@@ -65,28 +67,33 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	now := time.Now()
 	candidates := t.pool.Candidates(now, targetHost)
 	if len(candidates) == 0 {
-		return nil, errNoUpstreamProxy
+		return nil, ErrNoUpstreamProxy
 	}
 
 	var lastErr error
 	for _, candidate := range candidates {
-		attemptReq := cloneRequestForProxy(req, candidate.url, body, hasBody)
+		attemptReq := cloneRequestForProxy(req, candidate.URL, body, hasBody)
+		// The candidate owns its dial (socks, psiphon, authed CONNECT): let
+		// its DialContext establish the raw connection instead of the URL.
+		if candidate.DialContext != nil {
+			attemptReq = attemptReq.WithContext(context.WithValue(attemptReq.Context(), proxyDialerKey{}, true))
+		}
 		var resp *http.Response
 		var err error
 
-		if candidate.dialContext != nil {
+		if candidate.DialContext != nil {
 			if isPsiphonCandidate(candidate) {
-				v, _ := t.dialTransports.LoadOrStore(candidate.key, &http.Transport{
-					DialContext:           candidate.dialContext,
+				v, _ := t.dialTransports.LoadOrStore(candidate.Key, &http.Transport{
+					DialContext:           candidate.DialContext,
 					ForceAttemptHTTP2:     false,
 					MaxIdleConns:          10,
 					IdleConnTimeout:       90 * time.Second,
 					TLSHandshakeTimeout:   10 * time.Second,
-					ResponseHeaderTimeout: proxyHeaderTimeout,
+					ResponseHeaderTimeout: HeaderTimeout,
 				})
 				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 			} else {
-				v, _ := t.dialTransports.LoadOrStore(candidate.key, newUTLSTransport(candidate.dialContext))
+				v, _ := t.dialTransports.LoadOrStore(candidate.Key, NewUTLSTransport(candidate.DialContext))
 				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 			}
 		} else {
@@ -109,7 +116,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			}
 			if isHostUnreachable(err) {
 				if !isPsiphonCandidate(candidate) {
-					t.pool.MarkFailure(candidate.key, targetHost)
+					t.pool.MarkFailure(candidate.Key, targetHost)
 				}
 				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 				lastErr = err
@@ -120,7 +127,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				lastErr = err
 				continue
 			}
-			t.pool.MarkFailure(candidate.key, targetHost)
+			t.pool.MarkFailure(candidate.Key, targetHost)
 			logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 			lastErr = err
 			continue
@@ -130,20 +137,20 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if !isPsiphonCandidate(candidate) {
-				t.pool.MarkFailure(candidate.key, targetHost)
+				t.pool.MarkFailure(candidate.Key, targetHost)
 			}
 			logger.Printf("[RETRY]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
-			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.key)
+			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.Key)
 			continue
 		}
 
-		t.pool.MarkSuccess(candidate.key, targetHost)
+		t.pool.MarkSuccess(candidate.Key, targetHost)
 		logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
 		return resp, nil
 	}
 
 	if lastErr == nil {
-		lastErr = errNoUpstreamProxy
+		lastErr = ErrNoUpstreamProxy
 	}
 
 	return nil, lastErr
@@ -164,10 +171,10 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 		for _, candidate := range candidates {
 			var conn net.Conn
 			var err error
-			if candidate.dialContext != nil {
-				conn, err = candidate.dialContext(ctx, network, addr)
+			if candidate.DialContext != nil {
+				conn, err = candidate.DialContext(ctx, network, addr)
 			} else {
-				conn, err = httpProxyConnect(ctx, candidate.url, addr)
+				conn, err = httpProxyConnect(ctx, candidate.URL, addr)
 			}
 
 			var ti *tunnelInfo
@@ -186,7 +193,7 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 				}
 				if isHostUnreachable(err) {
 					if !isPsiphonCandidate(candidate) {
-						t.pool.MarkFailure(candidate.key, targetHost)
+						t.pool.MarkFailure(candidate.Key, targetHost)
 					}
 					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 					break
@@ -195,19 +202,19 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 					continue
 				}
-				t.pool.MarkFailure(candidate.key, targetHost)
+				t.pool.MarkFailure(candidate.Key, targetHost)
 				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 				continue
 			}
 
-			t.pool.MarkSuccess(candidate.key, targetHost)
+			t.pool.MarkSuccess(candidate.Key, targetHost)
 			logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate, ti))
 			return conn, nil
 		}
 	}
 
 	logger.Printf("[DIRECT] CONNECT %s (no proxy)", addr)
-	return (&net.Dialer{Timeout: proxyDialTimeout}).DialContext(ctx, network, addr)
+	return (&net.Dialer{Timeout: DialTimeout}).DialContext(ctx, network, addr)
 }
 
 func (t *RotatingProxyTransport) transportLogger() *log.Logger {
@@ -222,21 +229,21 @@ func (t *RotatingProxyTransport) transportLogger() *log.Logger {
 	return logger
 }
 
-func candidateLogAddress(c proxyCandidate, ti *tunnelInfo) string {
-	if isPsiphonCandidate(c) && c.psiphon != nil {
+func candidateLogAddress(c ProxyCandidate, ti *tunnelInfo) string {
+	if isPsiphonCandidate(c) && c.Psiphon != nil {
 		if ti != nil && ti.ip != "" {
 			return fmt.Sprintf("%s (%s)", ti.ip, ti.region)
 		}
 		return "tunnel"
 	}
 
-	host := c.url.Hostname()
+	host := c.URL.Hostname()
 	if host == "" {
-		host = c.url.Host
+		host = c.URL.Host
 	}
 
-	if c.country != "" {
-		return fmt.Sprintf("%s (%s)", host, c.country)
+	if c.Country != "" {
+		return fmt.Sprintf("%s (%s)", host, c.Country)
 	}
 
 	return host
@@ -251,13 +258,15 @@ func candidateProtoPrefix(ti *tunnelInfo) string {
 
 type proxyContextKey struct{}
 
+type proxyDialerKey struct{}
+
 func newProxyAwareTransport() http.RoundTripper {
 	dialer := &net.Dialer{
-		Timeout:   proxyDialTimeout,
+		Timeout:   DialTimeout,
 		KeepAlive: 30 * time.Second,
 	}
 
-	return newUTLSTransport(dialer.DialContext)
+	return NewUTLSTransport(dialer.DialContext)
 }
 
 func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
@@ -358,17 +367,38 @@ func isHostUnreachable(err error) bool {
 	return strings.Contains(err.Error(), "host unreachable")
 }
 
-func isPsiphonCandidate(c proxyCandidate) bool {
-	return c.url != nil && c.url.Scheme == "psiphon"
+func isPsiphonCandidate(c ProxyCandidate) bool {
+	return c.URL != nil && c.URL.Scheme == "psiphon"
 }
 
 func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: proxyDialTimeout}
+	d := &net.Dialer{Timeout: DialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
 	if err != nil {
 		return nil, err
 	}
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+
+	if proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         proxyURL.Hostname(),
+			InsecureSkipVerify: true, // provider certs are frequently stale
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("proxy tls handshake: %w", err)
+		}
+		conn = tlsConn
+	}
+
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", target, target)
+	if proxyURL.User != nil {
+		user := proxyURL.User.Username()
+		pass, _ := proxyURL.User.Password()
+		req += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n",
+			base64.StdEncoding.EncodeToString([]byte(user+":"+pass)))
+	}
+	req += "\r\n"
+
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		conn.Close()
 		return nil, err
@@ -391,4 +421,11 @@ func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (ne
 	}
 	conn.SetDeadline(time.Time{})
 	return conn, nil
+}
+
+// HTTPProxyConnect dials a target through an HTTP(S) proxy using CONNECT,
+// honoring basic auth from the URL userinfo. Exported for providers whose
+// credentials rotate (Turbo static creds, Urban per-server tokens).
+func HTTPProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (net.Conn, error) {
+	return httpProxyConnect(ctx, proxyURL, target)
 }

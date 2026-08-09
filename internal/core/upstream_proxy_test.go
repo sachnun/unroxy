@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"errors"
@@ -13,10 +13,10 @@ import (
 
 func TestProxyPoolCandidatesRandomOrder(t *testing.T) {
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "http://1.1.1.1:80", url: mustParseURL(t, "http://1.1.1.1:80")},
-			{key: "http://2.2.2.2:80", url: mustParseURL(t, "http://2.2.2.2:80")},
-			{key: "http://3.3.3.3:80", url: mustParseURL(t, "http://3.3.3.3:80")},
+		proxies: []*ProxyState{
+			{Key: "http://1.1.1.1:80", URL: mustParseURL(t, "http://1.1.1.1:80")},
+			{Key: "http://2.2.2.2:80", URL: mustParseURL(t, "http://2.2.2.2:80")},
+			{Key: "http://3.3.3.3:80", URL: mustParseURL(t, "http://3.3.3.3:80")},
 		},
 	}
 
@@ -27,7 +27,7 @@ func TestProxyPoolCandidatesRandomOrder(t *testing.T) {
 			t.Fatalf("expected 3 candidates, got %d", len(candidates))
 		}
 		for _, c := range candidates {
-			seen[c.key] = true
+			seen[c.Key] = true
 		}
 	}
 
@@ -40,10 +40,10 @@ func TestProxyPoolCandidatesRandomOrder(t *testing.T) {
 
 func TestProxyPoolCandidatesAllPresent(t *testing.T) {
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "http://1.1.1.1:80", url: mustParseURL(t, "http://1.1.1.1:80")},
-			{key: "http://2.2.2.2:80", url: mustParseURL(t, "http://2.2.2.2:80")},
-			{key: "http://3.3.3.3:80", url: mustParseURL(t, "http://3.3.3.3:80")},
+		proxies: []*ProxyState{
+			{Key: "http://1.1.1.1:80", URL: mustParseURL(t, "http://1.1.1.1:80")},
+			{Key: "http://2.2.2.2:80", URL: mustParseURL(t, "http://2.2.2.2:80")},
+			{Key: "http://3.3.3.3:80", URL: mustParseURL(t, "http://3.3.3.3:80")},
 		},
 	}
 
@@ -51,7 +51,7 @@ func TestProxyPoolCandidatesAllPresent(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		candidates := pool.Candidates(time.Now(), "ipwho.is")
 		for _, c := range candidates {
-			seen[c.key] = true
+			seen[c.Key] = true
 		}
 	}
 
@@ -65,10 +65,10 @@ func TestProxyPoolCandidatesAllPresent(t *testing.T) {
 func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "http://failed:80", url: mustParseURL(t, "http://failed:80")},
-			{key: "http://verified:80", url: mustParseURL(t, "http://verified:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
-			{key: "http://untested:80", url: mustParseURL(t, "http://untested:80")},
+		proxies: []*ProxyState{
+			{Key: "http://failed:80", URL: mustParseURL(t, "http://failed:80")},
+			{Key: "http://verified:80", URL: mustParseURL(t, "http://verified:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "http://untested:80", URL: mustParseURL(t, "http://untested:80")},
 		},
 		failedByHost: map[string]map[string]time.Time{
 			"ipwho.is": {"http://failed:80": time.Now()},
@@ -80,25 +80,25 @@ func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 		t.Fatalf("expected 3 candidates, got %d", len(candidates))
 	}
 
-	if candidates[2].key != "http://failed:80" {
+	if candidates[2].Key != "http://failed:80" {
 		t.Fatalf("expected failed proxy last, got order: %q, %q, %q",
-			candidates[0].key, candidates[1].key, candidates[2].key)
+			candidates[0].Key, candidates[1].Key, candidates[2].Key)
 	}
 
 	readyKeys := map[string]bool{"http://verified:80": true, "http://untested:80": true}
-	if !readyKeys[candidates[0].key] || !readyKeys[candidates[1].key] {
+	if !readyKeys[candidates[0].Key] || !readyKeys[candidates[1].Key] {
 		t.Fatalf("expected ready proxies first, got: %q, %q",
-			candidates[0].key, candidates[1].key)
+			candidates[0].Key, candidates[1].Key)
 	}
 }
 
 func TestProxyPoolCandidatesAllPresentNoHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "http://http:80", url: mustParseURL(t, "http://http:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
-			{key: "https://https:443", url: mustParseURL(t, "https://https:443"), healthy: true, lastChecked: now.Add(-time.Minute)},
-			{key: "socks5://socks:1080", url: mustParseURL(t, "socks5://socks:1080"), healthy: true, lastChecked: now.Add(-time.Minute)},
+		proxies: []*ProxyState{
+			{Key: "http://http:80", URL: mustParseURL(t, "http://http:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "https://https:443", URL: mustParseURL(t, "https://https:443"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "socks5://socks:1080", URL: mustParseURL(t, "socks5://socks:1080"), Healthy: true, LastChecked: now.Add(-time.Minute)},
 		},
 	}
 
@@ -106,7 +106,7 @@ func TestProxyPoolCandidatesAllPresentNoHost(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		candidates := pool.Candidates(now, "")
 		for _, c := range candidates {
-			seen[c.key] = true
+			seen[c.Key] = true
 		}
 	}
 
@@ -119,17 +119,17 @@ func TestProxyPoolCandidatesAllPresentNoHost(t *testing.T) {
 
 func TestProxyPoolReplaceSwapsProxies(t *testing.T) {
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "http://old:80", url: mustParseURL(t, "http://old:80")},
+		proxies: []*ProxyState{
+			{Key: "http://old:80", URL: mustParseURL(t, "http://old:80")},
 		},
 		failedByHost: map[string]map[string]time.Time{
 			"example.com": {"http://old:80": time.Now()},
 		},
 	}
 
-	pool.Replace([]*proxyState{
-		{key: "http://new1:80", url: mustParseURL(t, "http://new1:80")},
-		{key: "http://new2:80", url: mustParseURL(t, "http://new2:80")},
+	pool.Replace([]*ProxyState{
+		{Key: "http://new1:80", URL: mustParseURL(t, "http://new1:80")},
+		{Key: "http://new2:80", URL: mustParseURL(t, "http://new2:80")},
 	})
 
 	candidates := pool.Candidates(time.Now(), "")
@@ -144,8 +144,8 @@ func TestProxyPoolReplaceSwapsProxies(t *testing.T) {
 
 func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
+		proxies: []*ProxyState{
+			{Key: "socks5://good:1080", URL: mustParseURL(t, "socks5://good:1080")},
 		},
 	}
 
@@ -195,10 +195,10 @@ func TestRotatingProxyTransportUsesProxyForEveryRequest(t *testing.T) {
 func TestProxyPoolCandidatesAllPresentWithHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "http://global:80", url: mustParseURL(t, "http://global:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
-			{key: "http://host:80", url: mustParseURL(t, "http://host:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
-			{key: "http://probed:80", url: mustParseURL(t, "http://probed:80"), healthy: true, lastChecked: now.Add(-time.Minute)},
+		proxies: []*ProxyState{
+			{Key: "http://global:80", URL: mustParseURL(t, "http://global:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "http://host:80", URL: mustParseURL(t, "http://host:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "http://probed:80", URL: mustParseURL(t, "http://probed:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
 		},
 	}
 
@@ -206,7 +206,7 @@ func TestProxyPoolCandidatesAllPresentWithHost(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		candidates := pool.Candidates(now, "opencode.ai")
 		for _, c := range candidates {
-			seen[c.key] = true
+			seen[c.Key] = true
 		}
 	}
 
@@ -221,9 +221,9 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 	var logs strings.Builder
 	pool := &ProxyPool{
 		logger: log.New(&logs, "", 0),
-		proxies: []*proxyState{
-			{key: "https://blocked:443", url: mustParseURL(t, "https://blocked:443")},
-			{key: "http://good:80", url: mustParseURL(t, "http://good:80")},
+		proxies: []*ProxyState{
+			{Key: "https://blocked:443", URL: mustParseURL(t, "https://blocked:443")},
+			{Key: "http://good:80", URL: mustParseURL(t, "http://good:80")},
 		},
 		failedByHost: map[string]map[string]time.Time{
 			"example.com": {"http://good:80": time.Now()},
@@ -288,7 +288,7 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 	}
 	healthyCount := 0
 	for _, p := range pool.proxies {
-		if p.healthy {
+		if p.Healthy {
 			healthyCount++
 		}
 	}
@@ -318,9 +318,9 @@ func TestRequestTargetLogIncludesPathAndQuery(t *testing.T) {
 
 func TestRotatingProxyTransportRetriesAllProxiesOnDialError(t *testing.T) {
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
-			{key: "http://alsobad:80", url: mustParseURL(t, "http://alsobad:80")},
+		proxies: []*ProxyState{
+			{Key: "socks5://bad:1080", URL: mustParseURL(t, "socks5://bad:1080")},
+			{Key: "http://alsobad:80", URL: mustParseURL(t, "http://alsobad:80")},
 		},
 	}
 
@@ -356,8 +356,8 @@ func TestRotatingProxyTransportRetriesAllProxiesOnDialError(t *testing.T) {
 func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 	transport := &RotatingProxyTransport{
 		pool: &ProxyPool{
-			proxies: []*proxyState{
-				{key: "socks5://bad:1080", url: mustParseURL(t, "socks5://bad:1080")},
+			proxies: []*ProxyState{
+				{Key: "socks5://bad:1080", URL: mustParseURL(t, "socks5://bad:1080")},
 			},
 		},
 		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -386,8 +386,8 @@ func TestRotatingProxyTransportReturnsErrorWhenAllProxiesFail(t *testing.T) {
 
 func TestRotatingProxyTransportUsesProxyForRepeatedRequests(t *testing.T) {
 	pool := &ProxyPool{
-		proxies: []*proxyState{
-			{key: "socks5://good:1080", url: mustParseURL(t, "socks5://good:1080")},
+		proxies: []*ProxyState{
+			{Key: "socks5://good:1080", URL: mustParseURL(t, "socks5://good:1080")},
 		},
 	}
 
