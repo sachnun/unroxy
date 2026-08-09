@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
 )
 
-func initPsiphonNoticeHandler(logger *log.Logger) {
+func InitPsiphonNoticeHandler(logger *log.Logger) {
 	psiphon.SetNoticeWriter(psiphon.NewNoticeReceiver(func(notice []byte) {
 		var msg struct {
 			Type string `json:"noticeType"`

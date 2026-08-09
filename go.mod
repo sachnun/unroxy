@@ -11,6 +11,7 @@ require (
 	github.com/t14raptor/go-fast v0.0.4
 	github.com/tdewolff/parse/v2 v2.8.13
 	golang.org/x/net v0.57.0
+	golang.org/x/time v0.10.0
 	h12.io/socks v1.0.3
 )
 
@@ -114,7 +115,6 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/time v0.10.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20230325221338-052af4a8072b // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect

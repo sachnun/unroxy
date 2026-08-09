@@ -1,4 +1,4 @@
-package main
+package core
 
 func buildPsiphonConfig(dataDir string, poolSize, minIdle, maxTunnels int, egressRegion string) map[string]interface{} {
 	if minIdle > poolSize {

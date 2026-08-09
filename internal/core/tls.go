@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -11,11 +11,16 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-func newUTLSTransport(dialContext func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+func NewUTLSTransport(dialContext func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
 	return &http.Transport{
 		DialTLSContext: uTLSDialer(dialContext),
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
+			// https-scheme proxy: the dialContext performs the CONNECT-TLS
+			// itself; route directly to avoid double proxying.
+			if proxyURL != nil && proxyURL.Scheme == "https" {
+				return nil, nil
+			}
 			return proxyURL, nil
 		},
 		DialContext:           dialContext,
@@ -23,18 +28,7 @@ func newUTLSTransport(dialContext func(ctx context.Context, network, addr string
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: proxyHeaderTimeout,
-	}
-}
-
-func newProviderHTTPClient() *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   proxyDialTimeout,
-		KeepAlive: 30 * time.Second,
-	}
-	return &http.Client{
-		Timeout:   providerFetchTimeout,
-		Transport: newUTLSTransport(dialer.DialContext),
+		ResponseHeaderTimeout: HeaderTimeout,
 	}
 }
 
@@ -45,7 +39,11 @@ func uTLSDialer(dialContext func(ctx context.Context, network, addr string) (net
 		var rawConn net.Conn
 		var err error
 
-		if proxyURL != nil {
+		if _, own := ctx.Value(proxyDialerKey{}).(bool); own {
+			// The candidate's DialContext already establishes the connection
+			// through the proxy (socks / psiphon / authed CONNECT).
+			rawConn, err = dialContext(ctx, network, addr)
+		} else if proxyURL != nil {
 			rawConn, err = httpProxyConnect(ctx, proxyURL, addr)
 		} else {
 			rawConn, err = dialContext(ctx, network, addr)

@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/net/idna"
-	"unroxy/cmd/unroxy/rewriter"
+	"unroxy/internal/core/rewriter"
 )
 
 type ProxyHandler struct {

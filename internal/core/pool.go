@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -11,37 +11,37 @@ import (
 	"time"
 )
 
-type proxyState struct {
-	key         string
-	url         *url.URL
-	country     string
-	latency     time.Duration
-	healthy     bool
-	lastChecked time.Time
-	priority    int
-	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	psiphon     *PsiphonDialer
+type ProxyState struct {
+	Key         string
+	URL         *url.URL
+	Country     string
+	Latency     time.Duration
+	Healthy     bool
+	LastChecked time.Time
+	Priority    int
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	Psiphon     *PsiphonDialer
 }
 
-type proxyCandidate struct {
-	key         string
-	url         *url.URL
-	country     string
-	latency     time.Duration
-	priority    int
-	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	psiphon     *PsiphonDialer
+type ProxyCandidate struct {
+	Key         string
+	URL         *url.URL
+	Country     string
+	Latency     time.Duration
+	Priority    int
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	Psiphon     *PsiphonDialer
 }
 
 type ProxyPool struct {
 	logger *log.Logger
 
 	mu           sync.RWMutex
-	proxies      []*proxyState
+	proxies      []*ProxyState
 	failedByHost map[string]map[string]time.Time
 }
 
-func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
+func NewProxyPool(logger *log.Logger, proxies []*ProxyState) *ProxyPool {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -52,10 +52,10 @@ func NewProxyPool(logger *log.Logger, proxies []*proxyState) *ProxyPool {
 	}
 }
 
-func groupProxiesByCountry(proxies []*proxyState) map[string][]*proxyState {
-	groups := make(map[string][]*proxyState)
+func GroupProxiesByCountry(proxies []*ProxyState) map[string][]*ProxyState {
+	groups := make(map[string][]*ProxyState)
 	for _, p := range proxies {
-		code := p.country
+		code := p.Country
 		if code == "" {
 			code = "XX"
 		}
@@ -64,7 +64,7 @@ func groupProxiesByCountry(proxies []*proxyState) map[string][]*proxyState {
 	return groups
 }
 
-func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidate {
+func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidate {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -79,30 +79,30 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	// race and can panic "concurrent map writes").
 	failedSet := make(map[string]bool, len(p.failedByHost[rotationKey]))
 	for key, failedAt := range p.failedByHost[rotationKey] {
-		if time.Since(failedAt) < failureTTL {
+		if time.Since(failedAt) < FailureTTL {
 			failedSet[key] = true
 		}
 	}
 
-	ready := make([]proxyCandidate, 0, len(p.proxies))
-	failed := make([]proxyCandidate, 0, len(p.proxies))
+	ready := make([]ProxyCandidate, 0, len(p.proxies))
+	failed := make([]ProxyCandidate, 0, len(p.proxies))
 
 	for _, state := range p.proxies {
-		if state == nil || state.url == nil {
+		if state == nil || state.URL == nil {
 			continue
 		}
 
-		candidate := proxyCandidate{
-			key:         state.key,
-			url:         cloneURL(state.url),
-			country:     state.country,
-			latency:     state.latency,
-			priority:    state.priority,
-			dialContext: state.dialContext,
-			psiphon:     state.psiphon,
+		candidate := ProxyCandidate{
+			Key:         state.Key,
+			URL:         cloneURL(state.URL),
+			Country:     state.Country,
+			Latency:     state.Latency,
+			Priority:    state.Priority,
+			DialContext: state.DialContext,
+			Psiphon:     state.Psiphon,
 		}
 
-		if failedSet[state.key] {
+		if failedSet[state.Key] {
 			failed = append(failed, candidate)
 		} else {
 			ready = append(ready, candidate)
@@ -110,19 +110,19 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []proxyCandidat
 	}
 
 	sort.SliceStable(ready, func(i, j int) bool {
-		if ready[i].priority != ready[j].priority {
-			return ready[i].priority < ready[j].priority
+		if ready[i].Priority != ready[j].Priority {
+			return ready[i].Priority < ready[j].Priority
 		}
-		return ready[i].latency < ready[j].latency
+		return ready[i].Latency < ready[j].Latency
 	})
 	sort.SliceStable(failed, func(i, j int) bool {
-		if failed[i].priority != failed[j].priority {
-			return failed[i].priority < failed[j].priority
+		if failed[i].Priority != failed[j].Priority {
+			return failed[i].Priority < failed[j].Priority
 		}
-		return failed[i].latency < failed[j].latency
+		return failed[i].Latency < failed[j].Latency
 	})
 
-	ordered := make([]proxyCandidate, 0, len(p.proxies))
+	ordered := make([]ProxyCandidate, 0, len(p.proxies))
 	ordered = append(ordered, ready...)
 	ordered = append(ordered, failed...)
 	return ordered
@@ -133,12 +133,12 @@ func (p *ProxyPool) MarkSuccess(key, targetHost string) {
 	defer p.mu.Unlock()
 
 	for _, state := range p.proxies {
-		if state.key != key {
+		if state.Key != key {
 			continue
 		}
 
-		state.healthy = true
-		state.lastChecked = time.Now()
+		state.Healthy = true
+		state.LastChecked = time.Now()
 		delete(p.failedByHost[strings.ToLower(strings.TrimSpace(targetHost))], key)
 		return
 	}
@@ -149,12 +149,12 @@ func (p *ProxyPool) MarkFailure(key, targetHost string) {
 	defer p.mu.Unlock()
 
 	for _, state := range p.proxies {
-		if state.key != key {
+		if state.Key != key {
 			continue
 		}
 
-		state.healthy = false
-		state.lastChecked = time.Now()
+		state.Healthy = false
+		state.LastChecked = time.Now()
 		rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
 		if rotationKey != "" {
 			if p.failedByHost == nil {
@@ -175,7 +175,7 @@ func (p *ProxyPool) Count() int {
 	return len(p.proxies)
 }
 
-func (p *ProxyPool) Replace(proxies []*proxyState) {
+func (p *ProxyPool) Replace(proxies []*ProxyState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -183,28 +183,28 @@ func (p *ProxyPool) Replace(proxies []*proxyState) {
 	p.failedByHost = nil
 }
 
-func (p *ProxyPool) SetPrimary(primary *proxyState) {
+func (p *ProxyPool) SetPrimary(primary *ProxyState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	cp := *primary
-	cp.priority = 0
-	p.proxies = append([]*proxyState{&cp}, p.proxies...)
+	cp.Priority = 0
+	p.proxies = append([]*ProxyState{&cp}, p.proxies...)
 }
 
-func cloneProxyStates(proxies []*proxyState) []*proxyState {
+func cloneProxyStates(proxies []*ProxyState) []*ProxyState {
 	if len(proxies) == 0 {
 		return nil
 	}
 
-	cloned := make([]*proxyState, 0, len(proxies))
+	cloned := make([]*ProxyState, 0, len(proxies))
 	for _, proxy := range proxies {
-		if proxy == nil || proxy.url == nil {
+		if proxy == nil || proxy.URL == nil {
 			continue
 		}
 
 		state := *proxy
-		state.url = cloneURL(proxy.url)
+		state.URL = cloneURL(proxy.URL)
 		cloned = append(cloned, &state)
 	}
 

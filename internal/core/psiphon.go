@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -41,16 +41,16 @@ func TunnelInfoForHost(host string) *tunnelInfo {
 	return v.(*tunnelInfo)
 }
 
-func newPsiphonProxyState(d *PsiphonDialer) *proxyState {
+func NewPsiphonState(d *PsiphonDialer) *ProxyState {
 	if d == nil {
 		return nil
 	}
-	return &proxyState{
-		key:         "psiphon://" + d.region,
-		url:         &url.URL{Scheme: "psiphon", Host: d.region},
-		dialContext: d.DialContext,
-		country:     d.region,
-		psiphon:     d,
+	return &ProxyState{
+		Key:         "psiphon://" + d.region,
+		URL:         &url.URL{Scheme: "psiphon", Host: d.region},
+		DialContext: d.DialContext,
+		Country:     d.region,
+		Psiphon:     d,
 	}
 }
 
@@ -89,7 +89,7 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 		dataDir += "-" + region
 	}
 
-	dsDir := dataDir + "/ca.psiphon.PsiphonTunnel.tunnel-core/datastore"
+	dsDir := dataDir + "/ca.Psiphon.PsiphonTunnel.tunnel-core/datastore"
 	if err := os.MkdirAll(dsDir, 0755); err != nil {
 		return nil, err
 	}
@@ -145,6 +145,10 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 
 	return d, nil
 }
+
+func (d *PsiphonDialer) Region() string  { return d.region }
+func (d *PsiphonDialer) TargetPool() int { return d.targetPool }
+func (d *PsiphonDialer) IsReady() bool   { return d.tunnelReady.Load() > 0 }
 
 func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d.tunnelReady.Load() == 0 && d.targetPool > 0 {
