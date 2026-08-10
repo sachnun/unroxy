@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "cmd/**"
+      - "internal/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile"
@@ -20,7 +21,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: |
+          mkdir -p dist
+          ext=""
+          if [ "${{ matrix.os }}" = "windows" ]; then ext=".exe"; fi
+          CGO_ENABLED=0 GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} \
+            go build -trimpath -ldflags="-s -w" \
+            -o "dist/unroxy-${{ matrix.os }}-${{ matrix.arch }}${ext}" ./cmd/unroxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unroxy-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+
   docker:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: docker/setup-qemu-action@v3
@@ -32,8 +81,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: vars
-        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/sachnun/unroxy
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
 
       - uses: docker/build-push-action@v6
         with:
@@ -42,6 +96,4 @@ jobs:
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/sachnun/unroxy:latest
-            ghcr.io/sachnun/unroxy:sha-${{ steps.vars.outputs.sha_short }}
+          tags: ${{ steps.meta.outputs.tags }}
