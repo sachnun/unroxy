@@ -51,12 +51,13 @@ func (p *Provider) Start(ctx context.Context, host *providers.Host, logger *log.
 	logger.Printf("Turbo: %d servers", len(servers))
 
 	states := buildStates(servers)
-	healthy := core.TestProxiesConcurrently(states, core.HealthCheckConcurrency, logger)
-	for _, ps := range healthy {
+	for _, ps := range states {
 		ps.Priority = 2
 	}
-	host.ReplaceProxies(healthy)
-	logger.Printf("Turbo: %d healthy proxies", len(healthy))
+	// The background validator probes the fleet; healthy servers are
+	// graduated into the pools.
+	host.Submit(states)
+	logger.Printf("Turbo: %d proxies queued for validation", len(states))
 	return nil
 }
 

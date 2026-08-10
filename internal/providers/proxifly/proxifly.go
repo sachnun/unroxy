@@ -77,12 +77,13 @@ func (p *Provider) Refresh(ctx context.Context) error {
 
 func (p *Provider) distribute(proxies []*core.ProxyState) {
 	p.logger.Printf("Proxifly: %d proxies fetched", len(proxies))
-	healthy := core.TestProxiesConcurrently(proxies, core.HealthCheckConcurrency, p.logger)
-	for _, ps := range healthy {
+	for _, ps := range proxies {
 		ps.Priority = 1
 	}
-	p.host.ReplaceProxies(healthy)
-	p.logger.Printf("Proxifly: %d healthy proxies", len(healthy))
+	// The background validator probes every proxy; only the healthy ones
+	// are graduated into the pools.
+	p.host.Submit(proxies)
+	p.logger.Printf("Proxifly: %d proxies queued for validation", len(proxies))
 }
 
 func fetchETag() (string, error) {

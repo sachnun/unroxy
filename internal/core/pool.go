@@ -20,7 +20,11 @@ type ProxyState struct {
 	LastChecked time.Time
 	Priority    int
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	Psiphon     *PsiphonDialer
+	// ProbeFunc is an optional custom validator probe. Providers whose
+	// proxies burn credentials on CONNECT (e.g. Urban tokens) can install a
+	// cheaper check here; it takes precedence over the default CONNECT probe.
+	ProbeFunc func(ctx context.Context) (time.Duration, error)
+	Psiphon   *PsiphonDialer
 }
 
 type ProxyCandidate struct {
@@ -39,6 +43,13 @@ type ProxyPool struct {
 	mu           sync.RWMutex
 	proxies      []*ProxyState
 	failedByHost map[string]map[string]time.Time
+
+	// failCounts tracks consecutive real-traffic failures per proxy key.
+	// When a key reaches trafficFailThreshold, failureHook fires (outside
+	// the pool lock) so the validator can demote the proxy.
+	failCounts          map[string]int
+	trafficFailThreshold int
+	failureHook         func(key string)
 }
 
 func NewProxyPool(logger *log.Logger, proxies []*ProxyState) *ProxyPool {
@@ -128,6 +139,16 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidat
 	return ordered
 }
 
+// SetTrafficFailureHook registers a hook invoked (outside the pool lock)
+// whenever a proxy accumulates threshold consecutive failures from real
+// traffic. Pass threshold <= 0 to disable.
+func (p *ProxyPool) SetTrafficFailureHook(threshold int, fn func(key string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.trafficFailThreshold = threshold
+	p.failureHook = fn
+}
+
 func (p *ProxyPool) MarkSuccess(key, targetHost string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -140,14 +161,15 @@ func (p *ProxyPool) MarkSuccess(key, targetHost string) {
 		state.Healthy = true
 		state.LastChecked = time.Now()
 		delete(p.failedByHost[strings.ToLower(strings.TrimSpace(targetHost))], key)
+		delete(p.failCounts, key)
 		return
 	}
 }
 
 func (p *ProxyPool) MarkFailure(key, targetHost string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
+	var notify bool
 	for _, state := range p.proxies {
 		if state.Key != key {
 			continue
@@ -165,7 +187,23 @@ func (p *ProxyPool) MarkFailure(key, targetHost string) {
 			}
 			p.failedByHost[rotationKey][key] = time.Now()
 		}
-		return
+
+		if p.failCounts == nil {
+			p.failCounts = make(map[string]int)
+		}
+		p.failCounts[key]++
+		if p.failureHook != nil && p.trafficFailThreshold > 0 &&
+			p.failCounts[key] == p.trafficFailThreshold {
+			notify = true
+		}
+		break
+	}
+
+	hook := p.failureHook
+	p.mu.Unlock()
+
+	if notify && hook != nil {
+		hook(key)
 	}
 }
 
@@ -181,6 +219,7 @@ func (p *ProxyPool) Replace(proxies []*ProxyState) {
 
 	p.proxies = cloneProxyStates(proxies)
 	p.failedByHost = nil
+	p.failCounts = nil
 }
 
 func (p *ProxyPool) SetPrimary(primary *ProxyState) {

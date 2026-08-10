@@ -11,30 +11,55 @@ import (
 
 // Host is what a Provider receives to contribute capacity. It owns the
 // router, the default proxy pool and lazily-created country pools, and it
-// reapplies psiphon primaries whenever a pool's contents are replaced.
+// reapplies psiphon primaries whenever a pool's contents are replaced. All
+// fetched proxy lists pass through a background validator (Submit) before
+// they reach the pools.
 type Host struct {
 	logger *log.Logger
 	router *core.PoolRouter
 	pool   *core.ProxyPool
 
-	mu        sync.Mutex
-	countries map[string]*core.ProxyPool
-	primaries []*core.ProxyState
+	validator     *core.ProxyValidator
+	validatorOnce sync.Once
+
+	mu                    sync.Mutex
+	countries             map[string]*core.ProxyPool
+	primaries             []*core.ProxyState
+	trafficFailThreshold int
 }
 
-// NewHost builds a router with an empty default pool and no countries.
+// NewHost builds a router with an empty default pool and no countries, and
+// wires up the background validator that gates every submitted proxy list.
 func NewHost(logger *log.Logger) *Host {
 	if logger == nil {
 		logger = log.Default()
 	}
 	pool := core.NewProxyPool(logger, nil)
 	router := core.NewPoolRouter(nil, core.NewRotatingProxyTransport(pool))
-	return &Host{
+	h := &Host{
 		logger:    logger,
 		pool:      pool,
 		router:    router,
 		countries: make(map[string]*core.ProxyPool),
 	}
+
+	cfg := core.DefaultValidatorConfig()
+	validator := core.NewProxyValidator(logger, cfg)
+	validator.SetGraduate(h.ReplaceProxies)
+	h.validator = validator
+	h.trafficFailThreshold = cfg.TrafficFailThreshold
+
+	pool.SetTrafficFailureHook(cfg.TrafficFailThreshold, validator.OnTrafficFailure)
+	return h
+}
+
+// Submit routes a freshly fetched proxy list through the background
+// validator. Only proxies that pass probing are graduated into the pools;
+// everything else is quarantined with backoff and retried, then evicted
+// after repeated failures.
+func (h *Host) Submit(proxies []*core.ProxyState) {
+	h.validatorOnce.Do(h.validator.Start)
+	h.validator.Submit(proxies)
 }
 
 // Router exposes the pool router (for named pools, e.g. WARP variants).
@@ -56,6 +81,9 @@ func (h *Host) Country(code string) *core.ProxyPool {
 		return pool
 	}
 	pool := core.NewProxyPool(h.logger, nil)
+	if h.validator != nil {
+		pool.SetTrafficFailureHook(h.trafficFailThreshold, h.validator.OnTrafficFailure)
+	}
 	transport := core.NewRotatingProxyTransport(pool)
 	h.countries[code] = pool
 	h.router.Add(&core.NamedPool{
@@ -112,6 +140,9 @@ func (h *Host) countryLocked(code string) *core.ProxyPool {
 		return pool
 	}
 	pool := core.NewProxyPool(h.logger, nil)
+	if h.validator != nil {
+		pool.SetTrafficFailureHook(h.trafficFailThreshold, h.validator.OnTrafficFailure)
+	}
 	h.countries[code] = pool
 	h.router.Add(&core.NamedPool{
 		Name:      code,

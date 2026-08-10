@@ -246,9 +246,10 @@ func (p *Provider) distribute(countries []countryEntry) {
 	p.distributeLocked(countries)
 }
 
-// distributeLocked adds the Urban fleet to the pools without bulk health
-// checking (each probe would burn a minted token). Real traffic vets them:
-// failures are recorded by the pool and tokens are minted per connection.
+// distributeLocked adds the Urban fleet to the pools through the background
+// validator. Each probe uses a cheap TCP reachability check (a CONNECT probe
+// would burn a minted accs-proxy token per attempt); real CONNECT fitness is
+// vetted by traffic feedback, which demotes 407-failing proxies.
 func (p *Provider) distributeLocked(countries []countryEntry) {
 	states := make([]*core.ProxyState, 0, len(countries))
 	for _, c := range countries {
@@ -261,6 +262,16 @@ func (p *Provider) distributeLocked(countries []countryEntry) {
 				Country:  c.iso2,
 				Priority: 1,
 			}
+			state.ProbeFunc = func(ctx context.Context) (time.Duration, error) {
+				start := time.Now()
+				d := net.Dialer{Timeout: core.DialTimeout}
+				conn, err := d.DialContext(ctx, "tcp", addr)
+				if err != nil {
+					return 0, err
+				}
+				conn.Close()
+				return time.Since(start), nil
+			}
 			sig := s.signature
 			state.DialContext = func(ctx context.Context, network, target string) (net.Conn, error) {
 				return p.connect(ctx, sig, u, target)
@@ -268,8 +279,8 @@ func (p *Provider) distributeLocked(countries []countryEntry) {
 			states = append(states, state)
 		}
 	}
-	p.host.ReplaceProxies(states)
-	p.logger.Printf("Urban: %d proxies in rotation", len(states))
+	p.host.Submit(states)
+	p.logger.Printf("Urban: %d proxies queued for validation", len(states))
 }
 
 // connect mints (or reuses) a token and establishes a CONNECT tunnel.
