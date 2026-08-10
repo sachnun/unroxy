@@ -130,12 +130,12 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 			const colWidth = 12
 			for i, p := range stats.Pools {
 				entry := fmt.Sprintf("%s(%d)", p.Name, p.ProxyCount)
-				if i%3 == 0 {
+				if i%5 == 0 {
 					buf.WriteString(fmt.Sprintf("  %-*s", -colWidth, entry))
 				} else {
 					buf.WriteString(fmt.Sprintf("%-*s", colWidth, entry))
 				}
-				if i%3 == 2 || i == len(stats.Pools)-1 {
+				if i%5 == 4 || i == len(stats.Pools)-1 {
 					buf.WriteString("\n")
 				}
 			}
