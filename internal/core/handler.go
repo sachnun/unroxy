@@ -107,19 +107,19 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 
 	buf.WriteString("Usage\n")
 	buf.WriteString("─────\n")
-	buf.WriteString(fmt.Sprintf("  Rewrite   /example.com/path\n"))
-	buf.WriteString(fmt.Sprintf("            curl http://%s/example.com\n", r.Host))
-	buf.WriteString(fmt.Sprintf("\n  Proxy     curl -x http://%s http://example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("  Rewrite   /ipwho.is/path\n"))
+	buf.WriteString(fmt.Sprintf("            curl http://%s/ipwho.is\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  Proxy     curl -x http://%s http://ipwho.is\n", r.Host))
 	if h.tcpProxy != "" {
-		buf.WriteString(fmt.Sprintf("            curl -x http://%s https://example.com\n", h.tcpProxy))
+		buf.WriteString(fmt.Sprintf("            curl -x http://%s https://ipwho.is\n", h.tcpProxy))
 	}
-	buf.WriteString(fmt.Sprintf("\n  Region    curl http://%s/us/example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  Region    curl http://%s/us/ipwho.is\n", r.Host))
 	if h.tcpProxy != "" {
-		buf.WriteString(fmt.Sprintf("            curl -x http://us@%s https://example.com\n", h.tcpProxy))
+		buf.WriteString(fmt.Sprintf("            curl -x http://us@%s https://ipwho.is\n", h.tcpProxy))
 	}
-	buf.WriteString(fmt.Sprintf("\n  WARP      curl http://%s/warp/example.com\n", r.Host))
+	buf.WriteString(fmt.Sprintf("\n  WARP      curl http://%s/warp/ipwho.is\n", r.Host))
 	if h.tcpProxy != "" {
-		buf.WriteString(fmt.Sprintf("            curl -x http://warp@%s https://example.com\n", h.tcpProxy))
+		buf.WriteString(fmt.Sprintf("            curl -x http://warp@%s https://ipwho.is\n", h.tcpProxy))
 	}
 
 	if h.router != nil {
