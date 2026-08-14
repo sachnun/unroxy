@@ -23,6 +23,10 @@ type RotatingProxyTransport struct {
 	transport      http.RoundTripper
 	dialTransports sync.Map
 	warpTransport  *http.Transport
+
+	warpEgressOnce sync.Once
+	warpIP         string
+	warpISP        string
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -44,7 +48,11 @@ func (t *RotatingProxyTransport) SetWarpTransport(tr *http.Transport) {
 
 func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.warpTransport != nil {
-		return t.warpTransport.RoundTrip(req)
+		resp, err := t.warpTransport.RoundTrip(req)
+		if err == nil {
+			t.setWarpEgressHeaders(resp)
+		}
+		return resp, err
 	}
 
 	body, hasBody, err := snapshotRequestBody(req)
@@ -146,6 +154,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 
 		t.pool.MarkSuccess(candidate.Key, targetHost)
 		logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
+		t.setEgressHeaders(resp, candidate, targetHost)
 		return resp, nil
 	}
 
@@ -254,6 +263,70 @@ func candidateProtoPrefix(ti *tunnelInfo) string {
 		return "[TUN]"
 	}
 	return ""
+}
+
+// setEgressHeaders writes the externally observed exit identity onto an HTTP
+// response. For psiphon candidates the egress IP is read from the per-host
+// tunnel map (populated by the dialer); other candidates carry the IP/ISP
+// resolved during validation.
+func (t *RotatingProxyTransport) setEgressHeaders(resp *http.Response, c ProxyCandidate, targetHost string) {
+	if resp == nil {
+		return
+	}
+	if resp.Header == nil {
+		resp.Header = make(http.Header)
+	}
+
+	ip, isp := c.IP, c.ISP
+	if isPsiphonCandidate(c) {
+		if ti := TunnelInfoForHost(targetHost); ti != nil && ti.ip != "" {
+			ip = ti.ip
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			isp = ispForIP(ctx, ti.ip)
+			cancel()
+		}
+	}
+
+	if ip != "" {
+		resp.Header.Set("x-unroxy-ip", ip)
+	}
+	if isp != "" {
+		resp.Header.Set("x-unroxy-isp", isp)
+	}
+}
+
+func (t *RotatingProxyTransport) setWarpEgressHeaders(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	if resp.Header == nil {
+		resp.Header = make(http.Header)
+	}
+
+	ip, isp := t.warpEgress()
+	if ip != "" {
+		resp.Header.Set("x-unroxy-ip", ip)
+	}
+	if isp != "" {
+		resp.Header.Set("x-unroxy-isp", isp)
+	}
+}
+
+// warpEgress resolves the WARP exit identity once per transport, lazily on
+// first use, by issuing a real HTTPS request through the WARP dialer.
+func (t *RotatingProxyTransport) warpEgress() (string, string) {
+	t.warpEgressOnce.Do(func() {
+		if t.warpTransport == nil || t.warpTransport.DialContext == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), egressTimeout)
+		defer cancel()
+		if e, err := egressViaDial(ctx, t.warpTransport.DialContext); err == nil {
+			t.warpIP = e.IP
+			t.warpISP = e.ISP
+		}
+	})
+	return t.warpIP, t.warpISP
 }
 
 type proxyContextKey struct{}

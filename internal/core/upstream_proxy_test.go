@@ -456,6 +456,94 @@ func TestNewProxyAwareTransportKeepAliveEnabled(t *testing.T) {
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
+func TestSetEgressHeadersFromCandidate(t *testing.T) {
+	tr := &RotatingProxyTransport{}
+	resp := &http.Response{Header: make(http.Header)}
+
+	tr.setEgressHeaders(resp, ProxyCandidate{IP: "203.0.113.9", ISP: "ExampleNet"}, "example.com")
+
+	if got := resp.Header.Get("x-unroxy-ip"); got != "203.0.113.9" {
+		t.Fatalf("x-unroxy-ip = %q, want %q", got, "203.0.113.9")
+	}
+	if got := resp.Header.Get("x-unroxy-isp"); got != "ExampleNet" {
+		t.Fatalf("x-unroxy-isp = %q, want %q", got, "ExampleNet")
+	}
+}
+
+func TestSetEgressHeadersPsiphonUsesTunnelInfo(t *testing.T) {
+	globalHostTunnels.Store("example.com", &tunnelInfo{ip: "198.51.100.4", region: "US", protocol: "ssh"})
+	defer globalHostTunnels.Delete("example.com")
+
+	ispCacheMu.Lock()
+	ispCache["198.51.100.4"] = "TestISP"
+	ispCacheMu.Unlock()
+	defer func() {
+		ispCacheMu.Lock()
+		delete(ispCache, "198.51.100.4")
+		ispCacheMu.Unlock()
+	}()
+
+	tr := &RotatingProxyTransport{}
+	resp := &http.Response{Header: make(http.Header)}
+	candidate := ProxyCandidate{
+		URL: mustParseURL(t, "psiphon://US"),
+		IP:  "stale",
+		ISP: "stale",
+	}
+
+	tr.setEgressHeaders(resp, candidate, "example.com")
+
+	if got := resp.Header.Get("x-unroxy-ip"); got != "198.51.100.4" {
+		t.Fatalf("x-unroxy-ip = %q, want tunnel ip %q", got, "198.51.100.4")
+	}
+	if got := resp.Header.Get("x-unroxy-isp"); got != "TestISP" {
+		t.Fatalf("x-unroxy-isp = %q, want %q", got, "TestISP")
+	}
+}
+
+func TestRoundTripSetsEgressHeadersOnSuccess(t *testing.T) {
+	pool := &ProxyPool{
+		proxies: []*ProxyState{
+			{
+				Key: "http://good:80",
+				URL: mustParseURL(t, "http://good:80"),
+				IP:  "203.0.113.11",
+				ISP: "GoodNet",
+			},
+		},
+	}
+
+	transport := &RotatingProxyTransport{
+		pool: pool,
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest returned error: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("x-unroxy-ip"); got != "203.0.113.11" {
+		t.Fatalf("x-unroxy-ip = %q, want %q", got, "203.0.113.11")
+	}
+	if got := resp.Header.Get("x-unroxy-isp"); got != "GoodNet" {
+		t.Fatalf("x-unroxy-isp = %q, want %q", got, "GoodNet")
+	}
+}
+
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }

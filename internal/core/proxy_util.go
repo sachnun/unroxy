@@ -67,12 +67,11 @@ func TestProxyReachable(p *ProxyState) bool {
 }
 
 // ProbeProxy verifies a proxy end-to-end against the control target and
-// returns the measured latency. A custom ProbeFunc takes precedence (lets
-// token-based providers such as Urban avoid burning credentials on every
-// probe); otherwise the proxy's own DialContext (or a plain HTTP CONNECT
-// for URL-based proxies) is used, and the tunnel is exercised with a real
-// HTTP request to prove it actually relays traffic rather than merely
-// accepting TCP connections.
+// returns the measured latency. A custom ProbeFunc takes precedence (for
+// tests and special providers); otherwise the proxy's own DialContext (or a
+// plain HTTP CONNECT for URL-based proxies) is used, and the tunnel is
+// exercised with a real HTTP request to prove it actually relays traffic
+// rather than merely accepting TCP connections.
 func ProbeProxy(ctx context.Context, ps *ProxyState) (time.Duration, bool) {
 	if ps == nil {
 		return 0, false
@@ -87,15 +86,7 @@ func ProbeProxy(ctx context.Context, ps *ProxyState) (time.Duration, bool) {
 	}
 
 	start := time.Now()
-	var conn net.Conn
-	var err error
-	if ps.DialContext != nil {
-		conn, err = ps.DialContext(ctx, "tcp", ProbeTarget)
-	} else if ps.URL != nil {
-		conn, err = httpProxyConnect(ctx, ps.URL, ProbeTarget)
-	} else {
-		return 0, false
-	}
+	conn, err := dialProxy(ctx, ps, ProbeTarget)
 	if err != nil {
 		return 0, false
 	}
@@ -126,6 +117,24 @@ func ProbeProxy(ctx context.Context, ps *ProxyState) (time.Duration, bool) {
 	if !bytes.Contains(buf[:n], []byte("HTTP/")) {
 		return 0, false
 	}
+
+	// Relay works. Resolve the real egress identity once so responses can
+	// carry x-unroxy-ip / x-unroxy-isp. Best-effort: a proxy that relays
+	// but whose egress lookup fails still graduates, and the lookup is
+	// retried on the next re-probe until both fields are populated.
+	egCtx, cancel := context.WithTimeout(context.Background(), egressTimeout)
+	defer cancel()
+
+	if ps.IP == "" {
+		if e, err := resolveEgress(egCtx, ps); err == nil && e.IP != "" {
+			ps.IP = e.IP
+			ps.ISP = e.ISP
+		}
+	}
+	if ps.IP != "" && ps.ISP == "" {
+		ps.ISP = ispForIP(egCtx, ps.IP)
+	}
+
 	return time.Since(start), true
 }
 

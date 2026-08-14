@@ -25,6 +25,11 @@ type ProxyState struct {
 	// cheaper check here; it takes precedence over the default CONNECT probe.
 	ProbeFunc func(ctx context.Context) (time.Duration, error)
 	Psiphon   *PsiphonDialer
+	// IP and ISP are the externally observed egress identity of the proxy,
+	// resolved during validation and exposed on responses as x-unroxy-ip /
+	// x-unroxy-isp.
+	IP  string
+	ISP string
 }
 
 type ProxyCandidate struct {
@@ -35,6 +40,8 @@ type ProxyCandidate struct {
 	Priority    int
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	Psiphon     *PsiphonDialer
+	IP          string
+	ISP         string
 }
 
 type ProxyPool struct {
@@ -111,6 +118,8 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidat
 			Priority:    state.Priority,
 			DialContext: state.DialContext,
 			Psiphon:     state.Psiphon,
+			IP:          state.IP,
+			ISP:         state.ISP,
 		}
 
 		if failedSet[state.Key] {
