@@ -30,6 +30,10 @@ type ProxyState struct {
 	// x-unroxy-isp.
 	IP  string
 	ISP string
+	// CountryVerified is true once the egress country has been confirmed
+	// against the observed exit IP (ipwho.is). Providers declare a country
+	// from their own lists, which can be wrong for shared infrastructure.
+	CountryVerified bool
 }
 
 type ProxyCandidate struct {
@@ -54,9 +58,9 @@ type ProxyPool struct {
 	// failCounts tracks consecutive real-traffic failures per proxy key.
 	// When a key reaches trafficFailThreshold, failureHook fires (outside
 	// the pool lock) so the validator can demote the proxy.
-	failCounts          map[string]int
+	failCounts           map[string]int
 	trafficFailThreshold int
-	failureHook         func(key string)
+	failureHook          func(key string)
 }
 
 func NewProxyPool(logger *log.Logger, proxies []*ProxyState) *ProxyPool {

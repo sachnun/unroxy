@@ -6,23 +6,30 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
 
 // EgressInfo is the externally observed identity of a proxy's exit node.
 type EgressInfo struct {
-	IP  string
-	ISP string
+	IP      string
+	ISP     string
+	Country string
 }
 
-// egressTimeout bounds a single egress IP + ISP resolution.
+// egressTimeout bounds a single egress IP + ISP + country resolution.
 const egressTimeout = 8 * time.Second
 
 var (
-	ispCacheMu sync.Mutex
-	ispCache   = make(map[string]string) // egress IP -> ISP
+	ispCacheMu   sync.Mutex
+	ispCache     = make(map[string]string) // egress IP -> ISP
+	countryCache = make(map[string]string) // egress IP -> ISO country code
 )
+
+// ipWhoisBase is the ipwho.is API base URL. Kept as a variable so tests can
+// point it at a local server.
+var ipWhoisBase = "https://ipwho.is"
 
 // dialProxy opens a connection to addr through ps, preferring the proxy's
 // own DialContext and falling back to a URL-based HTTP CONNECT.
@@ -37,8 +44,9 @@ func dialProxy(ctx context.Context, ps *ProxyState, addr string) (net.Conn, erro
 }
 
 // resolveEgress measures the public egress IP observed through the proxy
-// and resolves its ISP. The ISP lookup is a property of the IP and is cached
-// globally, so it is fetched at most once per unique IP.
+// and resolves its ISP and country. The ISP/country lookups are properties
+// of the IP and are cached globally, so each is fetched at most once per
+// unique IP.
 func resolveEgress(ctx context.Context, ps *ProxyState) (EgressInfo, error) {
 	dial := ps.DialContext
 	if dial == nil {
@@ -53,7 +61,7 @@ func resolveEgress(ctx context.Context, ps *ProxyState) (EgressInfo, error) {
 }
 
 // egressViaDial performs a real HTTPS request through dial and resolves the
-// exit IP plus its ISP.
+// exit IP plus its ISP and country.
 func egressViaDial(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (EgressInfo, error) {
 	transport := &http.Transport{
 		DialContext:         dial,
@@ -90,7 +98,7 @@ func egressViaDial(ctx context.Context, dial func(ctx context.Context, network, 
 		return EgressInfo{}, errors.New("empty egress IP")
 	}
 
-	return EgressInfo{IP: out.IP, ISP: ispForIP(egCtx, out.IP)}, nil
+	return EgressInfo{IP: out.IP, ISP: ispForIP(egCtx, out.IP), Country: countryForIP(egCtx, out.IP)}, nil
 }
 
 var errEgressStatus = errors.New("egress endpoint returned non-200")
@@ -110,7 +118,7 @@ func ispForIP(ctx context.Context, ip string) string {
 	ispCacheMu.Unlock()
 
 	client := NewProviderHTTPClient()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipwho.is/"+ip, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ipWhoisBase+"/"+ip, nil)
 	if err != nil {
 		return ""
 	}
@@ -145,4 +153,59 @@ func ispForIP(ctx context.Context, ip string) string {
 	ispCache[ip] = isp
 	ispCacheMu.Unlock()
 	return isp
+}
+
+// countryForIP resolves the ISO 3166-1 alpha-2 country code for an egress IP
+// using a direct (non-proxied) lookup. Results are cached by IP.
+func countryForIP(ctx context.Context, ip string) string {
+	if ip == "" {
+		return ""
+	}
+
+	ispCacheMu.Lock()
+	if cc, ok := countryCache[ip]; ok {
+		ispCacheMu.Unlock()
+		return cc
+	}
+	ispCacheMu.Unlock()
+
+	client := NewProviderHTTPClient()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ipWhoisBase+"/"+ip, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var out struct {
+		Success     bool   `json:"success"`
+		CountryCode string `json:"country_code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ""
+	}
+	if !out.Success {
+		return ""
+	}
+
+	cc := strings.ToUpper(strings.TrimSpace(out.CountryCode))
+	if len(cc) != 2 {
+		return ""
+	}
+	for i := 0; i < len(cc); i++ {
+		if cc[i] < 'A' || cc[i] > 'Z' {
+			return ""
+		}
+	}
+
+	ispCacheMu.Lock()
+	countryCache[ip] = cc
+	ispCacheMu.Unlock()
+	return cc
 }

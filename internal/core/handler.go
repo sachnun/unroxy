@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -69,14 +70,21 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *ProxyHandler) resolveTransport(r *http.Request) http.RoundTripper {
+// errUnknownRegion is returned when a request authenticates with a region
+// username that does not map to any configured pool. It must never silently
+// fall back to the default (mixed-region) pool, otherwise a request like
+// `id@host` would return an arbitrary non-Indonesia exit.
+var errUnknownRegion = errors.New("unknown proxy region")
+
+func (h *ProxyHandler) resolveTransport(r *http.Request) (http.RoundTripper, error) {
 	username := AuthUsername(r)
 	if username != "" && h.router != nil {
 		if transport := h.router.Select(username); transport != nil {
-			return NewCFRetryTransport(transport, h.logger)
+			return NewCFRetryTransport(transport, h.logger), nil
 		}
+		return nil, errUnknownRegion
 	}
-	return h.transport
+	return h.transport, nil
 }
 
 func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +168,11 @@ func (h *ProxyHandler) handleForwardProxy(w http.ResponseWriter, r *http.Request
 		path = "/"
 	}
 
-	transport := h.resolveTransport(r)
+	transport, err := h.resolveTransport(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	proxy := h.createForwardProxy(scheme, domain, path, r.URL.RawQuery, transport)
 	proxy.ServeHTTP(w, r)
 }
@@ -179,7 +191,11 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 		target = net.JoinHostPort(target, "443")
 	}
 
-	transport := h.resolveTransport(r)
+	transport, err := h.resolveTransport(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	rt, ok := transport.(*RotatingProxyTransport)
 	if !ok {
 		if cr, isCF := transport.(*CFRetryTransport); isCF {
@@ -191,7 +207,12 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	targetConn, err := rt.DialContext(r.Context(), "tcp", target)
+	var targetConn net.Conn
+	if AuthUsername(r) != "" {
+		targetConn, err = rt.DialContextStrict(r.Context(), "tcp", target)
+	} else {
+		targetConn, err = rt.DialContext(r.Context(), "tcp", target)
+	}
 	if err != nil {
 		h.logger.Printf("[ERR] CONNECT %s: %v", target, err)
 		http.Error(w, "Failed to connect to target", http.StatusServiceUnavailable)

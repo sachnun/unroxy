@@ -129,10 +129,28 @@ func ProbeProxy(ctx context.Context, ps *ProxyState) (time.Duration, bool) {
 		if e, err := resolveEgress(egCtx, ps); err == nil && e.IP != "" {
 			ps.IP = e.IP
 			ps.ISP = e.ISP
+			// The provider-declared country can be wrong (shared infra,
+			// stale lists). Prefer the observed egress country so the proxy
+			// lands in the pool that matches where it actually exits.
+			if e.Country != "" {
+				ps.Country = e.Country
+				ps.CountryVerified = true
+			}
 		}
 	}
-	if ps.IP != "" && ps.ISP == "" {
-		ps.ISP = ispForIP(egCtx, ps.IP)
+	if ps.IP != "" {
+		if ps.ISP == "" {
+			ps.ISP = ispForIP(egCtx, ps.IP)
+		}
+		// Retry country verification if the first egress resolution did not
+		// observe it, so a mislabeled proxy is eventually re-routed to its
+		// actual region instead of staying wrong forever.
+		if !ps.CountryVerified {
+			if cc := countryForIP(egCtx, ps.IP); cc != "" {
+				ps.Country = cc
+				ps.CountryVerified = true
+			}
+		}
 	}
 
 	return time.Since(start), true

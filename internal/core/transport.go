@@ -170,60 +170,82 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 		return t.warpTransport.DialContext(ctx, network, addr)
 	}
 
+	conn, ok := t.dialThroughPool(ctx, network, addr)
+	if ok {
+		return conn, nil
+	}
+
+	t.transportLogger().Printf("[DIRECT] CONNECT %s (no proxy)", addr)
+	return (&net.Dialer{Timeout: DialTimeout}).DialContext(ctx, network, addr)
+}
+
+// DialContextStrict is like DialContext but never falls back to a direct
+// connection. Explicit region requests use it so an empty or exhausted pool
+// returns an error instead of leaking the server's own egress IP.
+func (t *RotatingProxyTransport) DialContextStrict(ctx context.Context, network, addr string) (net.Conn, error) {
+	if t.warpTransport != nil && t.warpTransport.DialContext != nil {
+		return t.warpTransport.DialContext(ctx, network, addr)
+	}
+
+	conn, ok := t.dialThroughPool(ctx, network, addr)
+	if !ok {
+		return nil, ErrNoUpstreamProxy
+	}
+	return conn, nil
+}
+
+// dialThroughPool tries every candidate in the pool and returns the first
+// successful connection. The boolean is false when no candidate succeeded.
+func (t *RotatingProxyTransport) dialThroughPool(ctx context.Context, network, addr string) (net.Conn, bool) {
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
 
-	now := time.Now()
-	candidates := t.pool.Candidates(now, targetHost)
+	candidates := t.pool.Candidates(time.Now(), targetHost)
+	for _, candidate := range candidates {
+		var conn net.Conn
+		var err error
+		if candidate.DialContext != nil {
+			conn, err = candidate.DialContext(ctx, network, addr)
+		} else {
+			conn, err = httpProxyConnect(ctx, candidate.URL, addr)
+		}
 
-	if len(candidates) > 0 {
-		for _, candidate := range candidates {
-			var conn net.Conn
-			var err error
-			if candidate.DialContext != nil {
-				conn, err = candidate.DialContext(ctx, network, addr)
-			} else {
-				conn, err = httpProxyConnect(ctx, candidate.URL, addr)
+		var ti *tunnelInfo
+		if isPsiphonCandidate(candidate) {
+			host, _, _ := net.SplitHostPort(addr)
+			ti = TunnelInfoForHost(host)
+		}
+
+		proto := candidateProtoPrefix(ti)
+		if err != nil {
+			if errors.Is(err, errPsiphonNotReady) {
+				continue
 			}
-
-			var ti *tunnelInfo
+			if ctx.Err() != nil {
+				break
+			}
+			if isHostUnreachable(err) {
+				if !isPsiphonCandidate(candidate) {
+					t.pool.MarkFailure(candidate.Key, targetHost)
+				}
+				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
+				break
+			}
 			if isPsiphonCandidate(candidate) {
-				host, _, _ := net.SplitHostPort(addr)
-				ti = TunnelInfoForHost(host)
-			}
-
-			proto := candidateProtoPrefix(ti)
-			if err != nil {
-				if errors.Is(err, errPsiphonNotReady) {
-					continue
-				}
-				if ctx.Err() != nil {
-					break
-				}
-				if isHostUnreachable(err) {
-					if !isPsiphonCandidate(candidate) {
-						t.pool.MarkFailure(candidate.Key, targetHost)
-					}
-					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
-					break
-				}
-				if isPsiphonCandidate(candidate) {
-					logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
-					continue
-				}
-				t.pool.MarkFailure(candidate.Key, targetHost)
 				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 				continue
 			}
-
-			t.pool.MarkSuccess(candidate.Key, targetHost)
-			logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate, ti))
-			return conn, nil
+			t.pool.MarkFailure(candidate.Key, targetHost)
+			logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
+			continue
 		}
+
+		t.pool.MarkSuccess(candidate.Key, targetHost)
+		logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate, ti))
+		return conn, true
 	}
 
-	logger.Printf("[DIRECT] CONNECT %s (no proxy)", addr)
-	return (&net.Dialer{Timeout: DialTimeout}).DialContext(ctx, network, addr)
+	return nil, false
 }
 
 func (t *RotatingProxyTransport) transportLogger() *log.Logger {
