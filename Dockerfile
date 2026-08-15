@@ -5,8 +5,9 @@ ARG TARGETARCH=amd64
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
+# wlynxg/anet@v0.0.5 linknames net.zoneCache; Go >=1.24 rejects unchecked linkname
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/unroxy ./cmd/unroxy
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=-checklinkname=0 -o /out/unroxy ./cmd/unroxy
 
 FROM alpine:latest AS usque-fetcher
 RUN apk --no-cache add curl unzip

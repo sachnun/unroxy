@@ -30,7 +30,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test
-        run: go test ./...
+        # wlynxg/anet@v0.0.5 linknames net.zoneCache; Go >=1.24 rejects unchecked linkname
+        run: go test -ldflags=-checklinkname=0 ./...
 
   build:
     needs: test
@@ -55,13 +56,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # wlynxg/anet@v0.0.5 linknames net.zoneCache; Go >=1.24 rejects unchecked linkname
       - name: Build
         run: |
           mkdir -p dist
           ext=""
           if [ "${{ matrix.os }}" = "windows" ]; then ext=".exe"; fi
           CGO_ENABLED=0 GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} \
-            go build -trimpath -ldflags="-s -w" \
+            go build -trimpath -ldflags="-s -w -checklinkname=0" \
             -o "dist/unroxy-${{ matrix.os }}-${{ matrix.arch }}${ext}" ./cmd/unroxy
       - uses: actions/upload-artifact@v4
         with:
