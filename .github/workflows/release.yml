@@ -31,7 +31,8 @@ jobs:
           cache: true
       - name: Test
         # wlynxg/anet@v0.0.5 linknames net.zoneCache; Go >=1.24 rejects unchecked linkname
-        run: go test -ldflags=-checklinkname=0 ./...
+        # -short skips live-network provider tests (tor bootstrap, geo lookups)
+        run: go test -short -ldflags=-checklinkname=0 ./...
 
   build:
     needs: test

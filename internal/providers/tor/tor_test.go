@@ -22,7 +22,16 @@ import (
 	"unroxy/internal/providers"
 )
 
+// requireLiveNetwork skips the test in -short mode (CI has no reliable
+// access to Tor directory authorities and geo APIs).
+func requireLiveNetwork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live-network test in -short mode")
+	}
+}
+
 func requireConsensus(t *testing.T) {
+	requireLiveNetwork(t)
 	t.Helper()
 	if common.GetGlobalConsensus() != nil && len(common.GetGlobalConsensus().RelayInformation) > 100 {
 		return
