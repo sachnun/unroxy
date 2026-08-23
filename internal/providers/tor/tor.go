@@ -13,10 +13,12 @@ package tor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -39,6 +41,9 @@ const (
 	buildTimeout   = 90 * time.Second
 	probeTimeout   = 45 * time.Second
 	rebuildTimeout = 90 * time.Second
+	// identityTimeout bounds the full HTTPS egress lookup through the 3-hop
+	// tunnel; core's fixed 8s egressTimeout is too tight for Tor.
+	identityTimeout = 60 * time.Second
 
 	// exitPort is the port used for exit-relay selection. Most exits allow
 	// both 80 and 443; 443 matches the bulk of real traffic.
@@ -178,6 +183,13 @@ func (p *Provider) buildCircuit(ctx context.Context, key string, logger *log.Log
 		logger.Printf("Tor [%s] probe failed", key)
 		return nil
 	}
+	if ps.Country == "" {
+		ictx, cancel := context.WithTimeout(ctx, identityTimeout)
+		if ip, cc, err := cp.resolveExitIdentity(ictx); err == nil {
+			ps.IP, ps.Country, ps.CountryVerified = ip, cc, true
+		}
+		cancel()
+	}
 	return &managedCircuit{cp: cp, ps: ps}
 }
 
@@ -206,22 +218,34 @@ func (p *Provider) Refresh(ctx context.Context) error {
 
 	healthy := make([]*core.ProxyState, 0, len(p.circuits))
 	rebuilt := 0
+	resolved := 0
 	for _, m := range p.circuits {
-		if m.cp.alive() {
-			healthy = append(healthy, m.ps)
-			continue
+		if !m.cp.alive() {
+			bctx, cancel := context.WithTimeout(ctx, rebuildTimeout)
+			err := m.cp.ensure(bctx)
+			cancel()
+			if err != nil {
+				continue
+			}
+			rebuilt++
 		}
-		bctx, cancel := context.WithTimeout(ctx, rebuildTimeout)
-		err := m.cp.ensure(bctx)
-		cancel()
-		if err != nil {
-			continue
+		// Circuits whose exit country is still unknown get another patient
+		// identity resolution attempt each refresh cycle.
+		if m.ps.Country == "" {
+			ictx, cancel := context.WithTimeout(ctx, identityTimeout)
+			if ip, cc, err := m.cp.resolveExitIdentity(ictx); err == nil {
+				m.ps.IP, m.ps.Country, m.ps.CountryVerified = ip, cc, true
+				resolved++
+			}
+			cancel()
 		}
-		rebuilt++
 		healthy = append(healthy, m.ps)
 	}
 	if rebuilt > 0 {
 		p.logger.Printf("Tor: rebuilt %d circuit(s)", rebuilt)
+	}
+	if resolved > 0 {
+		p.logger.Printf("Tor: resolved %d exit identit(y/ies)", resolved)
 	}
 	if len(healthy) == 0 {
 		return nil
@@ -231,6 +255,16 @@ func (p *Provider) Refresh(ctx context.Context) error {
 	groups := groupByExitCountry(healthy)
 	for cc, pool := range p.byCC {
 		pool.Replace(groups[cc])
+	}
+	// Register pools for newly identified countries.
+	for cc := range groups {
+		if _, ok := p.byCC[cc]; ok {
+			continue
+		}
+		pool := core.NewProxyPool(p.logger, groups[cc])
+		p.byCC[cc] = pool
+		p.host.AddNamed("TOR/"+cc, pool, core.NewRotatingProxyTransport(pool))
+		p.logger.Printf("Tor: new region pool /tor/%s", cc)
 	}
 	return nil
 }
@@ -301,6 +335,59 @@ type circuitProxy struct {
 	mu   sync.Mutex
 	conn *gonion.Conn
 	circ *gonion.Circuit
+}
+
+// resolveExitIdentity determines the observed egress IP and its country by
+// requesting an IP echo endpoint through the tunnel, then resolving the
+// country directly (non-proxied). Uses Tor-friendly timeouts.
+func (c *circuitProxy) resolveExitIdentity(ctx context.Context) (ip, cc string, err error) {
+	client := &http.Client{
+		Timeout: identityTimeout,
+		Transport: &http.Transport{
+			DialContext:           c.DialContext,
+			ForceAttemptHTTP2:     false,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org?format=json", nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	var doc struct {
+		IP string `json:"ip"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&doc)
+	resp.Body.Close()
+	if err != nil {
+		return "", "", err
+	}
+	if doc.IP == "" {
+		return "", "", fmt.Errorf("empty egress IP")
+	}
+
+	geoClient := core.NewProviderHTTPClient()
+	gresp, err := geoClient.Get("https://ipwho.is/" + doc.IP)
+	if err != nil {
+		return doc.IP, "", err
+	}
+	defer gresp.Body.Close()
+	var gdoc struct {
+		CountryCode string `json:"country_code"`
+	}
+	if err := json.NewDecoder(gresp.Body).Decode(&gdoc); err != nil {
+		return doc.IP, "", err
+	}
+	cc = strings.ToUpper(strings.TrimSpace(gdoc.CountryCode))
+	if len(cc) != 2 {
+		return doc.IP, "", fmt.Errorf("invalid country code %q", gdoc.CountryCode)
+	}
+	return doc.IP, cc, nil
 }
 
 // probe exercises the circuit with a real HTTP request against the shared

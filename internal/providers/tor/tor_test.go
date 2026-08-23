@@ -141,6 +141,19 @@ func TestProbeProxy(t *testing.T) {
 		t.Fatal("ProbeProxy failed")
 	}
 	t.Logf("probe ok, latency=%s country=%s ip=%s isp=%s", lat, ps.Country, ps.IP, ps.ISP)
+
+	// The patient identity resolution must succeed even when ProbeProxy's
+	// fixed 8s egress window is too tight for a 3-hop tunnel.
+	ictx, icancel := context.WithTimeout(context.Background(), identityTimeout)
+	defer icancel()
+	ip, cc, err := cp.resolveExitIdentity(ictx)
+	if err != nil {
+		t.Fatalf("resolveExitIdentity: %v", err)
+	}
+	if ip == "" || len(cc) != 2 {
+		t.Fatalf("bad identity: ip=%q cc=%q", ip, cc)
+	}
+	t.Logf("identity ok: exit=%s country=%s", ip, cc)
 }
 
 // TestRegisterNamedPools verifies the TOR and TOR/{CC} pool layout without

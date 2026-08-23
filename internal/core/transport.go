@@ -90,8 +90,12 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		var err error
 
 		if candidate.DialContext != nil {
-			if isPsiphonCandidate(candidate) {
-				v, _ := t.dialTransports.LoadOrStore(candidate.Key, &http.Transport{
+			if isTunnelCandidate(candidate) {
+				// Tunnel candidates (psiphon, tor) carry their own dialer;
+				// a plain transport dials the real target through it. The
+				// uTLS variant injects candidate.URL as an HTTP proxy which
+				// raw tunnels cannot speak.
+				v, _ := t.dialTransports.LoadOrStore("tunnel:"+candidate.Key, &http.Transport{
 					DialContext:           candidate.DialContext,
 					ForceAttemptHTTP2:     false,
 					MaxIdleConns:          10,
@@ -464,6 +468,12 @@ func isHostUnreachable(err error) bool {
 
 func isPsiphonCandidate(c ProxyCandidate) bool {
 	return c.URL != nil && c.URL.Scheme == "psiphon"
+}
+
+// isTunnelCandidate reports whether the candidate is a raw tunnel dialer
+// (embedded protocol) rather than an HTTP/SOCKS proxy endpoint.
+func isTunnelCandidate(c ProxyCandidate) bool {
+	return c.URL != nil && (c.URL.Scheme == "psiphon" || c.URL.Scheme == "tor")
 }
 
 func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (net.Conn, error) {
