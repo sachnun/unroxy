@@ -10,6 +10,7 @@ import (
 	// Register providers (blank imports activate init() registration).
 	_ "unroxy/internal/providers/proxifly"
 	_ "unroxy/internal/providers/psiphon"
+	_ "unroxy/internal/providers/tor"
 	_ "unroxy/internal/providers/turbo"
 	_ "unroxy/internal/providers/urban"
 	_ "unroxy/internal/providers/warp"
