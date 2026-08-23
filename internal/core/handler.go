@@ -129,6 +129,7 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 	if h.tcpProxy != "" {
 		buf.WriteString(fmt.Sprintf("            curl -x http://warp@%s https://ipwho.is\n", h.tcpProxy))
 	}
+	buf.WriteString(fmt.Sprintf("\n  Tor       in Region pools, e.g. curl http://%s/nl/ipwho.is (exit nodes mixed with proxies)\n", r.Host))
 
 	if h.router != nil {
 		stats := h.router.Stats()

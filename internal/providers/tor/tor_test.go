@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -19,7 +18,6 @@ import (
 	"github.com/robogg133/gonion/pkg/path"
 
 	"unroxy/internal/core"
-	"unroxy/internal/providers"
 )
 
 // requireLiveNetwork skips the test in -short mode (CI has no reliable
@@ -156,38 +154,19 @@ func TestProbeProxy(t *testing.T) {
 	t.Logf("identity ok: exit=%s country=%s", ip, cc)
 }
 
-// TestRegisterNamedPools verifies the TOR and TOR/{CC} pool layout without
-// touching the network.
-func TestRegisterNamedPools(t *testing.T) {
-	var p Provider
-	p.logger = log.New(io.Discard, "", 0)
-	p.host = providers.NewHost(nil)
-	p.byCC = make(map[string]*core.ProxyPool)
-
-	states := []*core.ProxyState{
-		{Key: "tor://a", Country: "de", URL: &url.URL{Scheme: "tor", Host: "circuit-a"}}, // lower case must normalize
-		{Key: "tor://b", Country: "AT", URL: &url.URL{Scheme: "tor", Host: "circuit-b"}},
-		{Key: "tor://c", URL: &url.URL{Scheme: "tor", Host: "circuit-c"}}, // no country -> only in TOR
+// TestGroupByExitCountry verifies country normalization used when the
+// validator graduates circuits into the country pools.
+func TestGroupByExitCountry(t *testing.T) {
+	groups := groupByExitCountry([]*core.ProxyState{
+		{Key: "tor://a", Country: "de", URL: &url.URL{Scheme: "tor", Host: "a"}},
+		{Key: "tor://b", Country: "AT", URL: &url.URL{Scheme: "tor", Host: "b"}},
+		{Key: "tor://c", URL: &url.URL{Scheme: "tor", Host: "c"}},
+	})
+	if len(groups["DE"]) != 1 || len(groups["AT"]) != 1 {
+		t.Fatalf("unexpected groups: %v", groups)
 	}
-	p.mu.Lock()
-	p.registerLocked(states)
-	p.mu.Unlock()
-
-	names := map[string]bool{}
-	for _, n := range p.host.Router().Names() {
-		names[n] = true
-	}
-	for _, want := range []string{"TOR", "TOR/DE", "TOR/AT"} {
-		if !names[want] {
-			t.Fatalf("named pool %q not registered; got %v", want, names)
-		}
-	}
-
-	if got := p.all.Count(); got != len(states) {
-		t.Fatalf("TOR pool has %d proxies, want %d", got, len(states))
-	}
-	if got := p.byCC["DE"].Count(); got != 1 {
-		t.Fatalf("TOR/DE pool has %d proxies, want 1", got)
+	if _, ok := groups[""]; ok {
+		t.Fatal("country-less circuit must not be grouped")
 	}
 }
 

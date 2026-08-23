@@ -1,10 +1,8 @@
 // Package tor implements an experimental Tor provider built on gonion, a
 // pure-Go Tor client: it bootstraps a consensus through directory
 // authorities, maintains a small pool of pre-built 3-hop circuits and
-// exposes them as dedicated named pools:
-//
-//	/tor       (or auth user "tor")      all circuits, random exit
-//	/tor/{CC}  (or auth user "tor/DE")   circuits whose exit is in CC
+// contributes them like Psiphon: merged into the general rotation and the
+// country pools matching each circuit's exit.
 //
 // The implementation is experimental: gonion is unaudited and its API is
 // unstable.
@@ -67,14 +65,12 @@ var dirAuthorities = []string{
 	"128.31.0.39:9101",   // moria1
 }
 
-// Provider starts the Tor circuit pools.
+// Provider starts the Tor circuit pool.
 type Provider struct {
 	mu       sync.Mutex
 	started  bool
 	logger   *log.Logger
 	host     *providers.Host
-	all      *core.ProxyPool
-	byCC     map[string]*core.ProxyPool
 	circuits []*managedCircuit
 }
 
@@ -103,7 +99,6 @@ func (p *Provider) start(ctx context.Context, host *providers.Host, logger *log.
 	p.started = true
 	p.logger = logger
 	p.host = host
-	p.byCC = make(map[string]*core.ProxyPool)
 	p.mu.Unlock()
 
 	if common.GetGlobalConsensus() == nil {
@@ -145,11 +140,10 @@ func (p *Provider) start(ctx context.Context, host *providers.Host, logger *log.
 
 	p.mu.Lock()
 	p.circuits = circuits
-	p.registerLocked(states)
 	p.mu.Unlock()
 
-	logger.Printf("Tor: %d circuits ready, path /tor or auth user \"tor\"%s",
-		len(circuits), regionSummary(circuits))
+	host.Submit(states)
+	logger.Printf("Tor: %d circuits in general rotation%s", len(circuits), regionSummary(circuits))
 }
 
 // buildCircuit ensures a live 3-hop tunnel and validates it end-to-end.
@@ -193,22 +187,8 @@ func (p *Provider) buildCircuit(ctx context.Context, key string, logger *log.Log
 	return &managedCircuit{cp: cp, ps: ps}
 }
 
-// registerLocked wires up the TOR and TOR/{CC} named pools. Called with
-// p.mu held.
-func (p *Provider) registerLocked(states []*core.ProxyState) {
-	p.all = core.NewProxyPool(p.logger, states)
-	p.host.AddNamed("TOR", p.all, core.NewRotatingProxyTransport(p.all))
-
-	groups := groupByExitCountry(states)
-	for cc, group := range groups {
-		pool := core.NewProxyPool(p.logger, group)
-		p.byCC[cc] = pool
-		p.host.AddNamed("TOR/"+cc, pool, core.NewRotatingProxyTransport(pool))
-	}
-}
-
-// Refresh periodically rebuilds dead circuits so the pools recover without
-// a process restart.
+// Refresh periodically rebuilds dead circuits and re-submits healthy ones
+// so the rotation recovers without a process restart.
 func (p *Provider) Refresh(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -251,21 +231,7 @@ func (p *Provider) Refresh(ctx context.Context) error {
 		return nil
 	}
 
-	p.all.Replace(healthy)
-	groups := groupByExitCountry(healthy)
-	for cc, pool := range p.byCC {
-		pool.Replace(groups[cc])
-	}
-	// Register pools for newly identified countries.
-	for cc := range groups {
-		if _, ok := p.byCC[cc]; ok {
-			continue
-		}
-		pool := core.NewProxyPool(p.logger, groups[cc])
-		p.byCC[cc] = pool
-		p.host.AddNamed("TOR/"+cc, pool, core.NewRotatingProxyTransport(pool))
-		p.logger.Printf("Tor: new region pool /tor/%s", cc)
-	}
+	p.host.Submit(healthy)
 	return nil
 }
 
