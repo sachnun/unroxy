@@ -27,7 +27,7 @@ func (p *Provider) Name() string { return "Psiphon" }
 
 func (p *Provider) Start(ctx context.Context, host *providers.Host, logger *log.Logger) error {
 	core.InitPsiphonNoticeHandler(logger)
-	core.EnsureServerEntries()
+	core.EnsureServerEntries(ctx, logger)
 
 	serverCounts := core.ServersByRegion()
 

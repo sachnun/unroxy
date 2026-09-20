@@ -1,8 +1,10 @@
 package core
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"strings"
 	"sync"
 
@@ -40,25 +42,24 @@ func parseServerEntries(raw string) map[string]serverEntryInfo {
 			continue
 		}
 		decodedLine := string(decoded)
-		parts := strings.SplitN(decodedLine, " ", 2)
-		if len(parts) < 2 {
+		jsonStart := strings.Index(decodedLine, "{")
+		if jsonStart < 0 {
 			continue
 		}
-		ip := parts[0]
 		var entry struct {
 			IpAddress       string `json:"ipAddress"`
 			WebServerSecret string `json:"webServerSecret"`
 			Region          string `json:"region"`
 		}
-		if json.Unmarshal([]byte(parts[1]), &entry) != nil {
+		if json.Unmarshal([]byte(decodedLine[jsonStart:]), &entry) != nil {
 			continue
 		}
-		if entry.IpAddress == "" || entry.WebServerSecret == "" {
+		if entry.IpAddress == "" {
 			continue
 		}
 		tag := protocol.GenerateServerEntryTag(entry.IpAddress, entry.WebServerSecret)
 		diagID := protocol.TagToDiagnosticID(tag)
-		entries[diagID] = serverEntryInfo{ip: ip, region: entry.Region}
+		entries[diagID] = serverEntryInfo{ip: entry.IpAddress, region: entry.Region}
 	}
 	return entries
 }
@@ -84,15 +85,22 @@ func PsiphonDialers() map[string]*PsiphonDialer {
 	return snapshot
 }
 
-// EnsureServerEntries parses the embedded server list once, if needed.
-func EnsureServerEntries() {
-	if allServerEntries == nil {
-		allServerEntries = parseServerEntries(embeddedServerList)
+// EnsureServerEntries loads the latest server list once, if needed.
+func EnsureServerEntries(ctx context.Context, logger *log.Logger) {
+	if allServerEntries != nil {
+		return
+	}
+	serverEntryList = loadServerEntries(ctx, logger)
+	allServerEntries = parseServerEntries(serverEntryList)
+	if len(allServerEntries) == 0 {
+		logger.Printf("Psiphon: no server entries available, provider will be idle")
 	}
 }
 
-// ServersByRegion counts embedded server entries per region.
+// ServersByRegion counts server entries per region.
 func ServersByRegion() map[string]int {
-	EnsureServerEntries()
+	if allServerEntries == nil {
+		return map[string]int{}
+	}
 	return serversByRegion()
 }

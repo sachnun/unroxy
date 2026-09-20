@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"log"
@@ -16,8 +15,7 @@ import (
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
 )
 
-//go:embed data/server_entries.txt
-var embeddedServerList string
+var serverEntryList string
 
 var errPsiphonNotReady = errors.New("psiphon not ready")
 
@@ -81,7 +79,7 @@ func serverIDFromConn(conn net.Conn) string {
 
 func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*PsiphonDialer, error) {
 	if allServerEntries == nil {
-		allServerEntries = parseServerEntries(embeddedServerList)
+		allServerEntries = parseServerEntries(serverEntryList)
 	}
 
 	dataDir := "/tmp/unroxy-psiphon"
@@ -124,9 +122,9 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
 
-	if embeddedServerList != "" {
-		if err := psiphon.ImportEmbeddedServerEntries(ctx, config, "", embeddedServerList); err != nil {
-			logger.Printf("Psiphon import server entries warning: %v", err)
+	if serverEntryList != "" {
+		if err := storeRemoteServerEntries(ctx, config, serverEntryList); err != nil {
+			logger.Printf("Psiphon store server entries warning: %v", err)
 		}
 	}
 
