@@ -65,6 +65,20 @@ func (r *PoolRouter) Default() http.RoundTripper {
 	return r.defaultTransport
 }
 
+func (r *PoolRouter) Names() []string {
+	if r == nil {
+		return nil
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.pools))
+	for _, p := range r.pools {
+		names = append(names, p.Username)
+	}
+	return names
+}
+
 type poolInfo struct {
 	Name       string
 	ProxyCount int

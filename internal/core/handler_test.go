@@ -91,6 +91,75 @@ func TestForwardProxyStripsSpoofedClientHeaders(t *testing.T) {
 	}
 }
 
+func TestRewriteProxyPathDeliversRequest(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Origin-Path", r.URL.Path)
+		w.Header().Set("X-Origin-Query", r.URL.RawQuery)
+		w.Header().Set("X-Origin-Host", r.Host)
+	}))
+	defer origin.Close()
+
+	upstream := newUpstreamProxy()
+	defer upstream.Close()
+
+	srv := testHandler(t, testTransport(upstream.proxyState(t)))
+	target := strings.TrimPrefix(origin.URL, "http://")
+
+	resp, err := http.Get(srv.URL + "/http://" + target + "/hello?q=1")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if got := resp.Header.Get("X-Origin-Path"); got != "/hello" {
+		t.Fatalf("origin path = %q, want /hello (%s)", got, body)
+	}
+	if got := resp.Header.Get("X-Origin-Query"); got != "q=1" {
+		t.Fatalf("origin query = %q, want q=1", got)
+	}
+	if got := resp.Header.Get("X-Origin-Host"); got != target {
+		t.Fatalf("origin host = %q, want %q", got, target)
+	}
+}
+
+func TestRewriteProxyParsesHostAndFullURL(t *testing.T) {
+	h := NewProxyHandler(log.New(io.Discard, "", 0), nil)
+
+	for _, tc := range []struct {
+		path              string
+		scheme, domain, p string
+	}{
+		{"/ipwho.is/foo", "https", "ipwho.is", "/foo"},
+		{"/https://ipwho.is/foo", "https", "ipwho.is", "/foo"},
+		{"/http://ipwho.is/foo", "http", "ipwho.is", "/foo"},
+		{"/ipwho.is", "https", "ipwho.is", "/"},
+		{"/useful", "", "", ""},
+	} {
+		_, scheme, domain, p, _ := h.parsePathProxy(httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if scheme != tc.scheme || domain != tc.domain || p != tc.p {
+			t.Fatalf("%s: got scheme=%q domain=%q path=%q, want %q %q %q", tc.path, scheme, domain, p, tc.scheme, tc.domain, tc.p)
+		}
+	}
+}
+
+func TestRewriteProxyRegionPrefix(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "US", Username: "us", Transport: testTransport()},
+	}, testTransport())
+
+	h := NewProxyHandler(log.New(io.Discard, "", 0), router)
+
+	pool, _, domain, path, _ := h.parsePathProxy(httptest.NewRequest(http.MethodGet, "/us/ipwho.is/foo", nil))
+	if pool != "US" || domain != "ipwho.is" || path != "/foo" {
+		t.Fatalf("got pool=%q domain=%q path=%q", pool, domain, path)
+	}
+
+	if _, _, domain, _, _ = h.parsePathProxy(httptest.NewRequest(http.MethodGet, "/useful/ipwho.is", nil)); domain != "" {
+		t.Fatalf("single-label host accepted: domain=%q", domain)
+	}
+}
+
 func TestForwardProxyRejectsUnsupportedScheme(t *testing.T) {
 	handler := NewProxyHandler(log.New(io.Discard, "", 0), nil)
 

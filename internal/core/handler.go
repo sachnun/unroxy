@@ -41,7 +41,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Host != "":
 		h.handleForwardProxy(w, r)
 	default:
-		h.writeIndexPage(w, r)
+		h.handleRewriteProxy(w, r)
 	}
 }
 
@@ -70,6 +70,8 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&buf, "  HTTP      curl -x http://%s http://ipwho.is\n", host)
 	fmt.Fprintf(&buf, "  CONNECT   curl -x http://%s https://ipwho.is\n", host)
 	fmt.Fprintf(&buf, "  Region    curl -x http://us@%s https://ipwho.is\n", host)
+	fmt.Fprintf(&buf, "  Rewrite   curl http://%s/ipwho.is/path\n", host)
+	fmt.Fprintf(&buf, "            curl http://%s/https://ipwho.is/path\n", host)
 
 	if h.router != nil {
 		stats := h.router.Stats()
@@ -94,6 +96,114 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(buf.String()))
+}
+
+func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request) {
+	pool, scheme, domain, path, query := h.parsePathProxy(r)
+	if domain == "" {
+		h.writeIndexPage(w, r)
+		return
+	}
+
+	transport := h.transport
+	if pool != "" && h.router != nil {
+		if t := h.router.Select(pool); t != nil {
+			transport = t
+		}
+	}
+
+	h.createProxy(scheme, domain, path, query, transport).ServeHTTP(w, r)
+}
+
+func (h *ProxyHandler) parsePathProxy(r *http.Request) (pool, scheme, domain, path, query string) {
+	scheme = "https"
+	query = r.URL.RawQuery
+	rest := strings.TrimPrefix(r.URL.Path, "/")
+	if rest == "" {
+		return "", "", "", "", query
+	}
+
+	if h.router != nil {
+		best := ""
+		for _, name := range h.router.Names() {
+			if len(name) > len(best) && len(rest) >= len(name) && strings.EqualFold(rest[:len(name)], name) &&
+				(len(rest) == len(name) || rest[len(name)] == '/') {
+				best = name
+			}
+		}
+		if best != "" {
+			pool = strings.ToUpper(best)
+			rest = strings.TrimPrefix(rest[len(best):], "/")
+			if rest == "" {
+				return pool, "", "", "", query
+			}
+		}
+	}
+
+	lower := strings.ToLower(rest)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		scheme, rest = "https", rest[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		scheme, rest = "http", rest[len("http://"):]
+	case strings.HasPrefix(lower, "https:"):
+		scheme, rest = "https", rest[len("https:"):]
+	case strings.HasPrefix(lower, "http:"):
+		scheme, rest = "http", rest[len("http:"):]
+	}
+	rest = strings.TrimLeft(rest, "/")
+	if rest == "" {
+		return "", "", "", "", ""
+	}
+
+	domain, path = rest, "/"
+	if i := strings.IndexByte(rest, '/'); i != -1 {
+		domain, path = rest[:i], rest[i:]
+	}
+	if j := strings.LastIndex(domain, "@"); j != -1 {
+		domain = domain[j+1:]
+	}
+	if !isValidDomain(domain) {
+		return "", "", "", "", ""
+	}
+
+	return pool, scheme, domain, path, query
+}
+
+func hostnameOnly(s string) string {
+	if i := strings.LastIndex(s, "@"); i != -1 {
+		s = s[i+1:]
+	}
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
+	}
+	return s
+}
+
+func isValidDomain(s string) bool {
+	host := hostnameOnly(s)
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if !strings.Contains(host, ".") {
+		return false
+	}
+	for _, part := range strings.Split(host, ".") {
+		if part == "" || len(part) > 63 {
+			return false
+		}
+		for i := 0; i < len(part); i++ {
+			c := part[i]
+			if c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func (h *ProxyHandler) handleForwardProxy(w http.ResponseWriter, r *http.Request) {
