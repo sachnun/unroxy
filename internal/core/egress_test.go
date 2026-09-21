@@ -44,7 +44,6 @@ func TestCountryForIP(t *testing.T) {
 	if got := countryForIP(ctx, "203.0.113.9"); got != "SG" {
 		t.Fatalf("countryForIP = %q, want SG", got)
 	}
-	// Cached: no additional server hit.
 	if got := countryForIP(ctx, "203.0.113.9"); got != "SG" {
 		t.Fatalf("cached countryForIP = %q, want SG", got)
 	}

@@ -22,11 +22,6 @@ type RotatingProxyTransport struct {
 	pool           *ProxyPool
 	transport      http.RoundTripper
 	dialTransports sync.Map
-	warpTransport  *http.Transport
-
-	warpEgressOnce sync.Once
-	warpIP         string
-	warpISP        string
 }
 
 func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
@@ -42,19 +37,7 @@ func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
 	}
 }
 
-func (t *RotatingProxyTransport) SetWarpTransport(tr *http.Transport) {
-	t.warpTransport = tr
-}
-
 func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if t.warpTransport != nil {
-		resp, err := t.warpTransport.RoundTrip(req)
-		if err == nil {
-			t.setWarpEgressHeaders(resp)
-		}
-		return resp, err
-	}
-
 	body, hasBody, err := snapshotRequestBody(req)
 	if err != nil {
 		return nil, err
@@ -66,7 +49,7 @@ func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byte, hasBody bool, targetHost string) (*http.Response, error) {
 	if t.pool == nil {
-		return nil, ErrNoUpstreamProxy
+		return nil, errNoUpstreamProxy
 	}
 
 	logger := t.transportLogger()
@@ -75,14 +58,12 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	now := time.Now()
 	candidates := t.pool.Candidates(now, targetHost)
 	if len(candidates) == 0 {
-		return nil, ErrNoUpstreamProxy
+		return nil, errNoUpstreamProxy
 	}
 
 	var lastErr error
 	for _, candidate := range candidates {
 		attemptReq := cloneRequestForProxy(req, candidate.URL, body, hasBody)
-		// The candidate owns its dial (socks, psiphon, authed CONNECT): let
-		// its DialContext establish the raw connection instead of the URL.
 		if candidate.DialContext != nil {
 			attemptReq = attemptReq.WithContext(context.WithValue(attemptReq.Context(), proxyDialerKey{}, true))
 		}
@@ -91,10 +72,6 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 
 		if candidate.DialContext != nil {
 			if isTunnelCandidate(candidate) {
-				// Tunnel candidates (psiphon, tor) carry their own dialer;
-				// a plain transport dials the real target through it. The
-				// uTLS variant injects candidate.URL as an HTTP proxy which
-				// raw tunnels cannot speak.
 				v, _ := t.dialTransports.LoadOrStore("tunnel:"+candidate.Key, &http.Transport{
 					DialContext:           candidate.DialContext,
 					ForceAttemptHTTP2:     false,
@@ -105,21 +82,21 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				})
 				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 			} else {
-				v, _ := t.dialTransports.LoadOrStore(candidate.Key, NewUTLSTransport(candidate.DialContext))
+				v, _ := t.dialTransports.LoadOrStore(candidate.Key, newUTLSTransport(candidate.DialContext))
 				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 			}
 		} else {
 			resp, err = t.transport.RoundTrip(attemptReq)
 		}
 
-		var ti *tunnelInfo
-		if isPsiphonCandidate(candidate) {
-			ti = TunnelInfoForHost(targetHost)
+		var ti *exitInfo
+		if isTunnelCandidate(candidate) {
+			ti = exitFor(targetHost)
 		}
 
 		proto := candidateProtoPrefix(ti)
 		if err != nil {
-			if errors.Is(err, errPsiphonNotReady) {
+			if errors.Is(err, errNotReady) {
 				continue
 			}
 			if req.Context().Err() != nil {
@@ -127,14 +104,14 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 				break
 			}
 			if isHostUnreachable(err) {
-				if !isPsiphonCandidate(candidate) {
+				if !isTunnelCandidate(candidate) {
 					t.pool.MarkFailure(candidate.Key, targetHost)
 				}
 				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 				lastErr = err
 				break
 			}
-			if isPsiphonCandidate(candidate) {
+			if isTunnelCandidate(candidate) {
 				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
 				lastErr = err
 				continue
@@ -148,7 +125,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 		if shouldRetryStatus(resp.StatusCode) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			if !isPsiphonCandidate(candidate) {
+			if !isTunnelCandidate(candidate) {
 				t.pool.MarkFailure(candidate.Key, targetHost)
 			}
 			logger.Printf("[RETRY]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
@@ -163,7 +140,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	}
 
 	if lastErr == nil {
-		lastErr = ErrNoUpstreamProxy
+		lastErr = errNoUpstreamProxy
 	}
 
 	return nil, lastErr
@@ -173,32 +150,23 @@ func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr 
 	return t.dialContext(ctx, network, addr, false)
 }
 
-// DialContextStrict is like DialContext but never falls back to a direct
-// connection. Explicit region requests use it so an empty or exhausted pool
-// returns an error instead of leaking the server's own egress IP.
 func (t *RotatingProxyTransport) DialContextStrict(ctx context.Context, network, addr string) (net.Conn, error) {
 	return t.dialContext(ctx, network, addr, true)
 }
 
 func (t *RotatingProxyTransport) dialContext(ctx context.Context, network, addr string, strict bool) (net.Conn, error) {
-	if t.warpTransport != nil && t.warpTransport.DialContext != nil {
-		return t.warpTransport.DialContext(ctx, network, addr)
-	}
-
 	conn, ok := t.dialThroughPool(ctx, network, addr)
 	if ok {
 		return conn, nil
 	}
 
 	if strict {
-		return nil, ErrNoUpstreamProxy
+		return nil, errNoUpstreamProxy
 	}
 	t.transportLogger().Printf("[DIRECT] CONNECT %s (no proxy)", addr)
 	return (&net.Dialer{Timeout: DialTimeout}).DialContext(ctx, network, addr)
 }
 
-// dialThroughPool tries every candidate in the pool and returns the first
-// successful connection. The boolean is false when no candidate succeeded.
 func (t *RotatingProxyTransport) dialThroughPool(ctx context.Context, network, addr string) (net.Conn, bool) {
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
@@ -213,28 +181,28 @@ func (t *RotatingProxyTransport) dialThroughPool(ctx context.Context, network, a
 			conn, err = httpProxyConnect(ctx, candidate.URL, addr)
 		}
 
-		var ti *tunnelInfo
-		if isPsiphonCandidate(candidate) {
+		var ti *exitInfo
+		if isTunnelCandidate(candidate) {
 			host, _, _ := net.SplitHostPort(addr)
-			ti = TunnelInfoForHost(host)
+			ti = exitFor(host)
 		}
 
 		proto := candidateProtoPrefix(ti)
 		if err != nil {
-			if errors.Is(err, errPsiphonNotReady) {
+			if errors.Is(err, errNotReady) {
 				continue
 			}
 			if ctx.Err() != nil {
 				break
 			}
 			if isHostUnreachable(err) {
-				if !isPsiphonCandidate(candidate) {
+				if !isTunnelCandidate(candidate) {
 					t.pool.MarkFailure(candidate.Key, targetHost)
 				}
 				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 				break
 			}
-			if isPsiphonCandidate(candidate) {
+			if isTunnelCandidate(candidate) {
 				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
 				continue
 			}
@@ -263,8 +231,8 @@ func (t *RotatingProxyTransport) transportLogger() *log.Logger {
 	return logger
 }
 
-func candidateLogAddress(c ProxyCandidate, ti *tunnelInfo) string {
-	if isPsiphonCandidate(c) && c.Psiphon != nil {
+func candidateLogAddress(c ProxyCandidate, ti *exitInfo) string {
+	if isTunnelCandidate(c) && c.Tunnel != nil {
 		if ti != nil && ti.ip != "" {
 			return fmt.Sprintf("%s (%s)", ti.ip, ti.region)
 		}
@@ -283,17 +251,13 @@ func candidateLogAddress(c ProxyCandidate, ti *tunnelInfo) string {
 	return host
 }
 
-func candidateProtoPrefix(ti *tunnelInfo) string {
+func candidateProtoPrefix(ti *exitInfo) string {
 	if ti != nil && ti.protocol != "" {
 		return "[TUN]"
 	}
 	return ""
 }
 
-// setEgressHeaders writes the externally observed exit identity onto an HTTP
-// response. For psiphon candidates the egress IP is read from the per-host
-// tunnel map (populated by the dialer); other candidates carry the IP/ISP
-// resolved during validation.
 func (t *RotatingProxyTransport) setEgressHeaders(resp *http.Response, c ProxyCandidate, targetHost string) {
 	if resp == nil {
 		return
@@ -303,8 +267,8 @@ func (t *RotatingProxyTransport) setEgressHeaders(resp *http.Response, c ProxyCa
 	}
 
 	ip, isp := c.IP, c.ISP
-	if isPsiphonCandidate(c) {
-		if ti := TunnelInfoForHost(targetHost); ti != nil && ti.ip != "" {
+	if isTunnelCandidate(c) {
+		if ti := exitFor(targetHost); ti != nil && ti.ip != "" {
 			ip = ti.ip
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			isp = ispForIP(ctx, ti.ip)
@@ -320,40 +284,6 @@ func (t *RotatingProxyTransport) setEgressHeaders(resp *http.Response, c ProxyCa
 	}
 }
 
-func (t *RotatingProxyTransport) setWarpEgressHeaders(resp *http.Response) {
-	if resp == nil {
-		return
-	}
-	if resp.Header == nil {
-		resp.Header = make(http.Header)
-	}
-
-	ip, isp := t.warpEgress()
-	if ip != "" {
-		resp.Header.Set("x-unroxy-ip", ip)
-	}
-	if isp != "" {
-		resp.Header.Set("x-unroxy-isp", isp)
-	}
-}
-
-// warpEgress resolves the WARP exit identity once per transport, lazily on
-// first use, by issuing a real HTTPS request through the WARP dialer.
-func (t *RotatingProxyTransport) warpEgress() (string, string) {
-	t.warpEgressOnce.Do(func() {
-		if t.warpTransport == nil || t.warpTransport.DialContext == nil {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), egressTimeout)
-		defer cancel()
-		if e, err := EgressViaDial(ctx, t.warpTransport.DialContext, egressTimeout); err == nil {
-			t.warpIP = e.IP
-			t.warpISP = e.ISP
-		}
-	})
-	return t.warpIP, t.warpISP
-}
-
 type proxyContextKey struct{}
 
 type proxyDialerKey struct{}
@@ -364,7 +294,7 @@ func newProxyAwareTransport() http.RoundTripper {
 		KeepAlive: 30 * time.Second,
 	}
 
-	return NewUTLSTransport(dialer.DialContext)
+	return newUTLSTransport(dialer.DialContext)
 }
 
 func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
@@ -384,8 +314,6 @@ func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
 	return body, true, nil
 }
 
-// setRequestBody restores a buffered body onto req so it can be replayed
-// across retry attempts.
 func setRequestBody(req *http.Request, body []byte) {
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.GetBody = func() (io.ReadCloser, error) {
@@ -465,14 +393,8 @@ func isHostUnreachable(err error) bool {
 	return strings.Contains(err.Error(), "host unreachable")
 }
 
-func isPsiphonCandidate(c ProxyCandidate) bool {
-	return c.URL != nil && c.URL.Scheme == "psiphon"
-}
-
-// isTunnelCandidate reports whether the candidate is a raw tunnel dialer
-// (embedded protocol) rather than an HTTP/SOCKS proxy endpoint.
 func isTunnelCandidate(c ProxyCandidate) bool {
-	return c.URL != nil && (c.URL.Scheme == "psiphon" || c.URL.Scheme == "tor")
+	return c.URL != nil && c.URL.Scheme == "psiphon"
 }
 
 func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (net.Conn, error) {
@@ -485,7 +407,7 @@ func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (ne
 	if proxyURL.Scheme == "https" {
 		tlsConn := tls.Client(conn, &tls.Config{
 			ServerName:         proxyURL.Hostname(),
-			InsecureSkipVerify: true, // provider certs are frequently stale
+			InsecureSkipVerify: true,
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			conn.Close()
@@ -525,11 +447,4 @@ func httpProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (ne
 	}
 	conn.SetDeadline(time.Time{})
 	return conn, nil
-}
-
-// HTTPProxyConnect dials a target through an HTTP(S) proxy using CONNECT,
-// honoring basic auth from the URL userinfo. Exported for providers whose
-// credentials rotate (Turbo static creds, Urban per-server tokens).
-func HTTPProxyConnect(ctx context.Context, proxyURL *url.URL, target string) (net.Conn, error) {
-	return httpProxyConnect(ctx, proxyURL, target)
 }

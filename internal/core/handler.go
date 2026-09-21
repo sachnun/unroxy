@@ -1,9 +1,6 @@
 package core
 
 import (
-	"bytes"
-	"compress/gzip"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,23 +8,17 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
-
-	"golang.org/x/net/idna"
-	"unroxy/internal/core/rewriter"
 )
 
 type ProxyHandler struct {
 	logger    *log.Logger
 	transport http.RoundTripper
 	router    *PoolRouter
-	tcpProxy  string
 }
 
-func NewProxyHandler(logger *log.Logger, router *PoolRouter, tcpProxy string) *ProxyHandler {
+func NewProxyHandler(logger *log.Logger, router *PoolRouter) *ProxyHandler {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -40,12 +31,6 @@ func NewProxyHandler(logger *log.Logger, router *PoolRouter, tcpProxy string) *P
 		h.transport = router.Default()
 	}
 
-	h.tcpProxy = tcpProxy
-
-	if h.transport != nil {
-		h.transport = NewCFRetryTransport(h.transport, h.logger)
-	}
-
 	return h
 }
 
@@ -56,79 +41,35 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Host != "":
 		h.handleForwardProxy(w, r)
 	default:
-		h.handleRewriteProxy(w, r)
+		h.writeIndexPage(w, r)
 	}
 }
 
-// errUnknownRegion is returned when a request authenticates with a region
-// username that does not map to any configured pool. It must never silently
-// fall back to the default (mixed-region) pool, otherwise a request like
-// `id@host` would return an arbitrary non-Indonesia exit.
 var errUnknownRegion = errors.New("unknown proxy region")
 
 func (h *ProxyHandler) resolveTransport(r *http.Request) (http.RoundTripper, error) {
-	username := AuthUsername(r)
+	username := authUsername(r)
 	if username != "" && h.router != nil {
 		if transport := h.router.Select(username); transport != nil {
-			return NewCFRetryTransport(transport, h.logger), nil
+			return transport, nil
 		}
 		return nil, errUnknownRegion
 	}
 	return h.transport, nil
 }
 
-func (h *ProxyHandler) handleRewriteProxy(w http.ResponseWriter, r *http.Request) {
-	poolName, scheme, domain, path, query := h.parsePoolRequest(r)
-	if domain == "" {
-		h.writeIndexPage(w, r)
-		return
-	}
-
-	if scheme != "http" && scheme != "https" {
-		scheme = "https"
-	}
-
-	if !isResolvable(domain) {
-		http.NotFound(w, r)
-		return
-	}
-
-	transport := h.transport
-	if poolName != "" && h.router != nil {
-		if t := h.router.Select(poolName); t != nil {
-			transport = NewCFRetryTransport(t, h.logger)
-		}
-	}
-
-	proxyBase := ""
-	if poolName != "" {
-		proxyBase = "/" + strings.ToLower(poolName)
-	}
-	proxy := h.createProxy(scheme, domain, path, query, transport, proxyBase)
-	proxy.ServeHTTP(w, r)
-}
-
 func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 	var buf strings.Builder
 
+	host := r.Host
+	if host == "" {
+		host = "localhost:8080"
+	}
 	buf.WriteString("Usage\n")
 	buf.WriteString("─────\n")
-	fmt.Fprintf(&buf, "  Rewrite   /ipwho.is/path\n")
-	fmt.Fprintf(&buf, "            /https://ipwho.is/path\n")
-	fmt.Fprintf(&buf, "            curl http://%s/ipwho.is\n", r.Host)
-	fmt.Fprintf(&buf, "            curl http://%s/https://ipwho.is/path\n", r.Host)
-	fmt.Fprintf(&buf, "\n  Proxy     curl -x http://%s http://ipwho.is\n", r.Host)
-	if h.tcpProxy != "" {
-		fmt.Fprintf(&buf, "            curl -x http://%s https://ipwho.is\n", h.tcpProxy)
-	}
-	fmt.Fprintf(&buf, "\n  Region    curl http://%s/us/ipwho.is\n", r.Host)
-	if h.tcpProxy != "" {
-		fmt.Fprintf(&buf, "            curl -x http://us@%s https://ipwho.is\n", h.tcpProxy)
-	}
-	fmt.Fprintf(&buf, "\n  WARP      curl http://%s/warp/ipwho.is\n", r.Host)
-	if h.tcpProxy != "" {
-		fmt.Fprintf(&buf, "            curl -x http://warp@%s https://ipwho.is\n", h.tcpProxy)
-	}
+	fmt.Fprintf(&buf, "  HTTP      curl -x http://%s http://ipwho.is\n", host)
+	fmt.Fprintf(&buf, "  CONNECT   curl -x http://%s https://ipwho.is\n", host)
+	fmt.Fprintf(&buf, "  Region    curl -x http://us@%s https://ipwho.is\n", host)
 
 	if h.router != nil {
 		stats := h.router.Stats()
@@ -173,8 +114,7 @@ func (h *ProxyHandler) handleForwardProxy(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	proxy := h.createProxy(scheme, domain, path, r.URL.RawQuery, transport, "")
-	proxy.ServeHTTP(w, r)
+	h.createProxy(scheme, domain, path, r.URL.RawQuery, transport).ServeHTTP(w, r)
 }
 
 func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Request) {
@@ -197,18 +137,13 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	rt, ok := transport.(*RotatingProxyTransport)
-	if !ok {
-		if cr, isCF := transport.(*CFRetryTransport); isCF {
-			rt, ok = cr.base.(*RotatingProxyTransport)
-		}
-	}
 	if !ok || rt == nil {
 		http.Error(w, "Transport not available", http.StatusInternalServerError)
 		return
 	}
 
 	var targetConn net.Conn
-	if AuthUsername(r) != "" {
+	if authUsername(r) != "" {
 		targetConn, err = rt.DialContextStrict(r.Context(), "tcp", target)
 	} else {
 		targetConn, err = rt.DialContext(r.Context(), "tcp", target)
@@ -261,218 +196,8 @@ func (h *ProxyHandler) handleConnectTunnel(w http.ResponseWriter, r *http.Reques
 	wg.Wait()
 }
 
-func (h *ProxyHandler) parsePoolRequest(r *http.Request) (pool, scheme, domain, path, query string) {
-	scheme = "https"
-	query = r.URL.RawQuery
-	fullPath := strings.TrimPrefix(r.URL.Path, "/")
-	if fullPath == "" {
-		return "", "", "", "", query
-	}
-
-	remainder := fullPath
-	if h.router != nil {
-		best := ""
-		for _, name := range h.router.Names() {
-			if best != "" && len(name) <= len(best) {
-				continue
-			}
-			if strings.EqualFold(fullPath, name) {
-				if len(name) > len(best) {
-					best = name
-				}
-				continue
-			}
-			if len(fullPath) > len(name) && fullPath[len(name)] == '/' && strings.EqualFold(fullPath[:len(name)], name) {
-				if len(name) > len(best) {
-					best = name
-				}
-			}
-		}
-		if best != "" {
-			pool = strings.ToUpper(best)
-			if len(fullPath) == len(best) {
-				return pool, scheme, "", "", query
-			}
-			remainder = fullPath[len(best)+1:]
-			if remainder == "" {
-				return pool, scheme, "", "", query
-			}
-		}
-	}
-
-	rest := remainder
-	lower := strings.ToLower(rest)
-	switch {
-	case strings.HasPrefix(lower, "https://"):
-		scheme = "https"
-		rest = rest[len("https://"):]
-	case strings.HasPrefix(lower, "http://"):
-		scheme = "http"
-		rest = rest[len("http://"):]
-	case strings.HasPrefix(lower, "https:/"):
-		scheme = "https"
-		rest = rest[len("https:/"):]
-		rest = strings.TrimPrefix(rest, "/")
-	case strings.HasPrefix(lower, "http:/"):
-		scheme = "http"
-		rest = rest[len("http:/"):]
-		rest = strings.TrimPrefix(rest, "/")
-	case strings.HasPrefix(lower, "https:"):
-		scheme = "https"
-		rest = rest[len("https:"):]
-		rest = strings.TrimLeft(rest, "/")
-	case strings.HasPrefix(lower, "http:"):
-		scheme = "http"
-		rest = rest[len("http:"):]
-		rest = strings.TrimLeft(rest, "/")
-	}
-	rest = strings.TrimPrefix(rest, "/")
-	if rest == "" {
-		return "", "", "", "", ""
-	}
-
-	domain = rest
-	path = "/"
-	if i := strings.Index(rest, "/"); i != -1 {
-		domain = rest[:i]
-		path = rest[i:]
-		if path == "" {
-			path = "/"
-		}
-	}
-	if domain == "" {
-		return "", "", "", "", ""
-	}
-	if j := strings.LastIndex(domain, "@"); j != -1 {
-		domain = domain[j+1:]
-		if domain == "" {
-			return "", "", "", "", ""
-		}
-	}
-
-	if !isValidDomain(domain) {
-		return "", "", "", "", ""
-	}
-
-	return pool, scheme, domain, path, query
-}
-
-func hostnameOnly(s string) string {
-	if i := strings.LastIndex(s, "@"); i != -1 {
-		s = s[i+1:]
-	}
-	if h, _, err := net.SplitHostPort(s); err == nil {
-		return h
-	}
-	if i := strings.LastIndex(s, ":"); i != -1 {
-		portPart := s[i+1:]
-		if portPart != "" {
-			numeric := true
-			for _, c := range portPart {
-				if c < '0' || c > '9' {
-					numeric = false
-					break
-				}
-			}
-			if numeric {
-				return s[:i]
-			}
-		}
-	}
-	return s
-}
-
-func isValidDomain(s string) bool {
-	host := hostnameOnly(s)
-	ascii, err := idna.ToASCII(host)
-	if err != nil || ascii == "" {
-		return false
-	}
-	parts := strings.Split(ascii, ".")
-	if len(parts) < 2 {
-		return false
-	}
-	for _, part := range parts {
-		if len(part) == 0 {
-			return false
-		}
-	}
-	return true
-}
-
-type dnsEntry struct {
-	ok bool
-	at time.Time
-}
-
-// resolvCache caches LookupHost results for the rewrite path. isResolvable
-// previously did one blocking DNS lookup per request (2s timeout) — at high
-// QPS that doubles as a per-request latency tax and resolver load spike.
-// Positive results are cached 60s, negatives 10s so a transient failure is
-// retried quickly. The map is capped and old entries purged on insert.
-var resolvCache = struct {
-	mu      sync.Mutex
-	entries map[string]dnsEntry
-	max     int
-	ttlOK   time.Duration
-	ttlFail time.Duration
-}{
-	entries: make(map[string]dnsEntry, 1024),
-	max:     4096,
-	ttlOK:   60 * time.Second,
-	ttlFail: 10 * time.Second,
-}
-
-const dnsLookupTimeout = 2 * time.Second
-
-func isResolvable(domain string) bool {
-	host := hostnameOnly(domain)
-	if host == "" {
-		return false
-	}
-	domain = host
-	resolvCache.mu.Lock()
-	if e, ok := resolvCache.entries[domain]; ok {
-		ttl := resolvCache.ttlOK
-		if !e.ok {
-			ttl = resolvCache.ttlFail
-		}
-		if time.Since(e.at) < ttl {
-			resolvCache.mu.Unlock()
-			return e.ok
-		}
-		delete(resolvCache.entries, domain)
-	}
-	resolvCache.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
-	defer cancel()
-	_, err := net.DefaultResolver.LookupHost(ctx, domain)
-	resolved := err == nil
-
-	resolvCache.mu.Lock()
-	if len(resolvCache.entries) >= resolvCache.max {
-		now := time.Now()
-		for k, e := range resolvCache.entries {
-			ttl := resolvCache.ttlOK
-			if !e.ok {
-				ttl = resolvCache.ttlFail
-			}
-			if now.Sub(e.at) >= ttl {
-				delete(resolvCache.entries, k)
-			}
-		}
-		if len(resolvCache.entries) >= resolvCache.max {
-			clear(resolvCache.entries)
-		}
-	}
-	resolvCache.entries[domain] = dnsEntry{ok: resolved, at: time.Now()}
-	resolvCache.mu.Unlock()
-	return resolved
-}
-
-func (h *ProxyHandler) createProxy(scheme, domain, path, query string, transport http.RoundTripper, proxyBase string) *httputil.ReverseProxy {
-	rp := &httputil.ReverseProxy{
+func (h *ProxyHandler) createProxy(scheme, domain, path, query string, transport http.RoundTripper) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		ErrorLog:  log.New(io.Discard, "", 0),
 		Transport: transport,
 		Director: func(req *http.Request) {
@@ -480,76 +205,16 @@ func (h *ProxyHandler) createProxy(scheme, domain, path, query string, transport
 			req.URL.Host = domain
 			req.URL.Path = path
 			req.URL.RawQuery = query
-
-			rewriter.RewriteRequestHeaders(req, domain)
+			req.Host = domain
+			req.Header["X-Forwarded-For"] = nil
+			req.Header.Del("X-Real-IP")
+			req.Header.Del("X-Originating-IP")
+			req.Header.Del("True-Client-IP")
+			req.Header.Del("Client-IP")
+			req.Header.Del("Forwarded")
+			req.Header.Del("X-Forwarded-Host")
+			req.Header.Del("X-Forwarded-Proto")
+			req.Header.Del("CF-Connecting-IP")
 		},
 	}
-
-	// Rewrite mode (proxyBase != "") rewrites the response so all URLs route
-	// through the proxy base; the forward proxy passes responses through.
-	if proxyBase != "" {
-		rp.ModifyResponse = func(resp *http.Response) error {
-			resp.Header.Set("Cache-Control", "no-store")
-			resp.Header.Set("Pragma", "no-cache")
-			resp.Header.Set("Expires", "0")
-
-			rewriter.RewriteHeaders(resp, domain, proxyBase)
-
-			contentType := resp.Header.Get("Content-Type")
-			needsRewrite := strings.Contains(contentType, "text/html") ||
-				strings.Contains(contentType, "text/css") ||
-				strings.Contains(contentType, "javascript")
-
-			if !needsRewrite {
-				return nil
-			}
-
-			body, err := h.readResponseBody(resp)
-			if err != nil {
-				return err
-			}
-
-			var newBody []byte
-			switch {
-			case strings.Contains(contentType, "text/html"):
-				newBody = rewriter.RewriteHTML(body, domain, proxyBase)
-			case strings.Contains(contentType, "text/css"):
-				newBody = rewriter.RewriteCSS(body, domain, proxyBase)
-			case strings.Contains(contentType, "javascript"):
-				newBody = rewriter.RewriteJS(body, domain, proxyBase)
-			default:
-				newBody = body
-			}
-
-			resp.Body = io.NopCloser(bytes.NewReader(newBody))
-			resp.ContentLength = int64(len(newBody))
-			resp.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
-			resp.Header.Del("Content-Encoding")
-
-			return nil
-		}
-	}
-
-	return rp
-}
-
-func (h *ProxyHandler) readResponseBody(resp *http.Response) ([]byte, error) {
-	var reader io.Reader = resp.Body
-
-	if resp.Header.Get("Content-Encoding") == "gzip" {
-		gzipReader, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		defer gzipReader.Close()
-		reader = gzipReader
-	}
-
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	resp.Body.Close()
-
-	return body, nil
 }

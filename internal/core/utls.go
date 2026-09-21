@@ -11,13 +11,11 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-func NewUTLSTransport(dialContext func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+func newUTLSTransport(dialContext func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
 	return &http.Transport{
 		DialTLSContext: uTLSDialer(dialContext),
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			proxyURL, _ := req.Context().Value(proxyContextKey{}).(*url.URL)
-			// https-scheme proxy: the dialContext performs the CONNECT-TLS
-			// itself; route directly to avoid double proxying.
 			if proxyURL != nil && proxyURL.Scheme == "https" {
 				return nil, nil
 			}
@@ -40,8 +38,6 @@ func uTLSDialer(dialContext func(ctx context.Context, network, addr string) (net
 		var err error
 
 		if _, own := ctx.Value(proxyDialerKey{}).(bool); own {
-			// The candidate's DialContext already establishes the connection
-			// through the proxy (socks / psiphon / authed CONNECT).
 			rawConn, err = dialContext(ctx, network, addr)
 		} else if proxyURL != nil {
 			rawConn, err = httpProxyConnect(ctx, proxyURL, addr)

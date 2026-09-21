@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -17,38 +18,39 @@ import (
 
 var serverEntryList string
 
-var errPsiphonNotReady = errors.New("psiphon not ready")
+var errNotReady = errors.New("psiphon not ready")
 
-const psiphonRetryCount = 3
+const dialAttempts = 3
 
-type PsiphonDialer struct {
+type Dialer struct {
+	id          string
 	controller  *psiphon.Controller
 	cancel      context.CancelFunc
 	tunnelReady atomic.Int32
 	targetPool  int
 	region      string
 
-	serverEntries map[string]serverEntryInfo
+	serverEntries map[string]serverInfo
 }
 
-func TunnelInfoForHost(host string) *tunnelInfo {
+func exitFor(host string) *exitInfo {
 	v, ok := globalHostTunnels.Load(host)
 	if !ok {
 		return nil
 	}
-	return v.(*tunnelInfo)
+	return v.(*exitInfo)
 }
 
-func NewPsiphonState(d *PsiphonDialer) *ProxyState {
+func NewState(d *Dialer) *ProxyState {
 	if d == nil {
 		return nil
 	}
 	return &ProxyState{
-		Key:         "psiphon://" + d.region,
-		URL:         &url.URL{Scheme: "psiphon", Host: d.region},
+		Key:         "psiphon://" + d.id,
+		URL:         &url.URL{Scheme: "psiphon", Host: d.id},
 		DialContext: d.DialContext,
 		Country:     d.region,
-		Psiphon:     d,
+		Tunnel:      d,
 	}
 }
 
@@ -77,35 +79,29 @@ func serverIDFromConn(conn net.Conn) string {
 	return ""
 }
 
-func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*PsiphonDialer, error) {
-	if allServerEntries == nil {
-		allServerEntries = parseServerEntries(serverEntryList)
-	}
+func NewDialer(id, region string, entries []ServerEntry, logger *log.Logger) (*Dialer, error) {
+	dataDir := "/tmp/unroxy-psiphon-" + id
 
-	dataDir := "/tmp/unroxy-psiphon"
-	if region != "" {
-		dataDir += "-" + region
-	}
-
-	dsDir := dataDir + "/ca.Psiphon.PsiphonTunnel.tunnel-core/datastore"
+	dsDir := dataDir + "/ca.Tunnel.PsiphonTunnel.tunnel-core/datastore"
 	if err := os.MkdirAll(dsDir, 0755); err != nil {
 		return nil, err
 	}
 
-	minIdle := max(0, poolSize-1)
-	maxTunnels := poolSize
-
-	d := &PsiphonDialer{
-		targetPool:    poolSize,
-		region:        region,
-		serverEntries: allServerEntries,
+	byID := make(map[string]serverInfo, len(entries))
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = serverInfo{ip: e.IP, region: e.Region}
+		lines = append(lines, e.Raw)
 	}
 
-	regionDialersMu.Lock()
-	regionDialers[region] = d
-	regionDialersMu.Unlock()
+	d := &Dialer{
+		id:            id,
+		targetPool:    len(entries),
+		region:        region,
+		serverEntries: byID,
+	}
 
-	pc := buildPsiphonConfig(dataDir, poolSize, minIdle, maxTunnels, region)
+	pc := buildPsiphonConfig(dataDir, len(entries), region)
 	configJSON, _ := json.Marshal(pc)
 
 	config, err := psiphon.LoadConfig(configJSON)
@@ -122,10 +118,8 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 	ctx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
 
-	if serverEntryList != "" {
-		if err := storeRemoteServerEntries(ctx, config, serverEntryList); err != nil {
-			logger.Printf("Psiphon store server entries warning: %v", err)
-		}
+	if err := storeRemoteServerEntries(ctx, config, strings.Join(lines, "\n")); err != nil {
+		logger.Printf("Psiphon store server entries warning: %v", err)
 	}
 
 	controller, err := psiphon.NewController(config)
@@ -135,25 +129,27 @@ func NewPsiphonDialer(region string, poolSize int, logger *log.Logger) (*Psiphon
 	}
 	d.controller = controller
 
+	registerDialer(d, entries)
+
 	go controller.Run(ctx)
 
 	refreshInterval := 30 * time.Minute
-	refreshCount := max(1, poolSize/3)
+	refreshCount := max(1, len(entries)/3)
 	d.startTunnelRefresh(ctx, refreshInterval, refreshCount, logger)
 
 	return d, nil
 }
 
-func (d *PsiphonDialer) Region() string  { return d.region }
-func (d *PsiphonDialer) TargetPool() int { return d.targetPool }
-func (d *PsiphonDialer) IsReady() bool   { return d.tunnelReady.Load() > 0 }
+func (d *Dialer) Region() string  { return d.region }
+func (d *Dialer) TargetPool() int { return d.targetPool }
+func (d *Dialer) IsReady() bool   { return d.tunnelReady.Load() > 0 }
 
-func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d.tunnelReady.Load() == 0 && d.targetPool > 0 {
-		return nil, errPsiphonNotReady
+		return nil, errNotReady
 	}
 	var lastErr error
-	for i := 0; i < psiphonRetryCount; i++ {
+	for i := 0; i < dialAttempts; i++ {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -167,7 +163,7 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 					if v, ok := protocolByIP.Load(serverIP); ok {
 						proto, _ = v.(string)
 					}
-					globalHostTunnels.Store(host, &tunnelInfo{ip: e.ip, region: e.region, protocol: proto})
+					globalHostTunnels.Store(host, &exitInfo{ip: e.ip, region: e.region, protocol: proto})
 					break
 				}
 			}
@@ -178,7 +174,7 @@ func (d *PsiphonDialer) DialContext(ctx context.Context, network, addr string) (
 	return nil, lastErr
 }
 
-func (d *PsiphonDialer) startTunnelRefresh(ctx context.Context, interval time.Duration, count int, logger *log.Logger) {
+func (d *Dialer) startTunnelRefresh(ctx context.Context, interval time.Duration, count int, logger *log.Logger) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

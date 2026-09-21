@@ -4,16 +4,7 @@ go 1.26.0
 
 require (
 	github.com/Psiphon-Labs/psiphon-tunnel-core v0.0.14-beta-ios.0.20260612203040-bac21c558d69
-	github.com/bogdanfinn/fhttp v0.6.8
-	github.com/bogdanfinn/tls-client v1.11.2
-	github.com/iancoleman/orderedmap v0.3.0
 	github.com/refraction-networking/utls v1.8.2
-	github.com/robogg133/gonion v0.0.0-20260823011642-e847439cb8fd
-	github.com/t14raptor/go-fast v0.0.4
-	github.com/tdewolff/parse/v2 v2.8.13
-	golang.org/x/net v0.57.0
-	golang.org/x/time v0.10.0
-	h12.io/socks v1.0.3
 )
 
 require (
@@ -38,8 +29,6 @@ require (
 	github.com/bifurcation/mint v0.0.0-20180306135233-198357931e61 // indirect
 	github.com/bits-and-blooms/bitset v1.10.0 // indirect
 	github.com/bits-and-blooms/bloom/v3 v3.6.0 // indirect
-	github.com/bogdanfinn/quic-go-utls v1.0.4-utls // indirect
-	github.com/bogdanfinn/utls v1.7.7-barnius // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect
 	github.com/cheekybits/genny v0.0.0-20170328200008-9127e812e1e9 // indirect
 	github.com/cognusion/go-cache-lru v0.0.0-20170419142635-f73e2280ecea // indirect
@@ -64,14 +53,10 @@ require (
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/libp2p/go-reuseport v0.4.0 // indirect
 	github.com/marusama/semaphore v0.0.0-20171214154724-565ffd8e868a // indirect
-	github.com/mattn/go-colorable v0.1.15 // indirect
-	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/socket v0.5.0 // indirect
 	github.com/miekg/dns v1.1.65 // indirect
 	github.com/mroth/weightedrand v1.0.0 // indirect
-	github.com/nukilabs/ftoa v1.0.0 // indirect
-	github.com/nukilabs/unicodeid v0.1.0 // indirect
 	github.com/onsi/gomega v1.27.10 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
@@ -97,15 +82,12 @@ require (
 	github.com/refraction-networking/ed25519 v0.1.2 // indirect
 	github.com/refraction-networking/gotapdance v1.7.10 // indirect
 	github.com/refraction-networking/obfs4 v0.1.2 // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/sergeyfrolov/bsbuffer v0.0.0-20180903213811-94e85abb8507 // indirect
 	github.com/shadowsocks/go-shadowsocks2 v0.1.5 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/smallnest/ringbuffer v0.1.2-0.20260703033355-9d1708966377 // indirect
 	github.com/syndtr/gocapability v0.0.0-20170704070218-db04d3cc01c8 // indirect
 	github.com/tailscale/goupnp v1.0.1-0.20210804011211-c64d0f06ea05 // indirect
 	github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85 // indirect
-	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
@@ -117,9 +99,11 @@ require (
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20240110193028-0dcbfd608b1e // indirect
 	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/time v0.10.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20230325221338-052af4a8072b // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect

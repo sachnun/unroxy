@@ -7,7 +7,7 @@ import (
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon"
 )
 
-func InitPsiphonNoticeHandler(logger *log.Logger) {
+func InitNotices(logger *log.Logger) {
 	psiphon.SetNoticeWriter(psiphon.NewNoticeReceiver(func(notice []byte) {
 		var msg struct {
 			Type string `json:"noticeType"`
@@ -29,17 +29,13 @@ func InitPsiphonNoticeHandler(logger *log.Logger) {
 		}
 
 		if msg.Type == "ActiveTunnel" {
-			if entry, ok := allServerEntries[msg.Data.DiagnosticID]; ok {
-				regionDialersMu.Lock()
-				d, ok := regionDialers[entry.region]
-				if ok {
-					n := d.tunnelReady.Add(1)
-					regionDialersMu.Unlock()
-					if int(n) == d.targetPool {
-						logger.Printf("Psiphon [%s]: %d/%d tunnels ready", entry.region, n, d.targetPool)
-					}
-				} else {
-					regionDialersMu.Unlock()
+			regionDialersMu.Lock()
+			d := dialerByServerID[msg.Data.DiagnosticID]
+			regionDialersMu.Unlock()
+			if d != nil {
+				n := d.tunnelReady.Add(1)
+				if n == 1 || int(n) == d.targetPool {
+					logger.Printf("Psiphon [%s]: %d/%d tunnels ready", d.id, n, d.targetPool)
 				}
 			}
 		}

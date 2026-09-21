@@ -16,24 +16,17 @@ import (
 	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common/protocol"
 )
 
-// Public values embedded in every Psiphon client. They authenticate the
-// signed server list served by the Psiphon Network and are not secret.
 const (
 	psiphonRemoteServerListSignaturePublicKey = "MIICIDANBgkqhkiG9w0BAQEFAAOCAg0AMIICCAKCAgEAt7Ls+/39r+T6zNW7GiVpJfzq/xvL9SBH5rIFnk0RXYEYavax3WS6HOD35eTAqn8AniOwiH+DOkvgSKF2caqk/y1dfq47Pdymtwzp9ikpB1C5OfAysXzBiwVJlCdajBKvBZDerV1cMvRzCKvKwRmvDmHgphQQ7WfXIGbRbmmk6opMBh3roE42KcotLFtqp0RRwLtcBRNtCdsrVsjiI1Lqz/lH+T61sGjSjQ3CHMuZYSQJZo/KrvzgQXpkaCTdbObxHqb6/+i1qaVOfEsvjoiyzTxJADvSytVtcTjijhPEV6XskJVHE1Zgl+7rATr/pDQkw6DPCNBS1+Y6fy7GstZALQXwEDN/qhQI9kWkHijT8ns+i1vGg00Mk/6J75arLhqcodWsdeG/M/moWgqQAnlZAGVtJI1OgeF5fsPpXu4kctOfuZlGjVZXQNW34aOzm8r8S0eVZitPlbhcPiR4gT/aSMz/wd8lZlzZYsje/Jr8u/YtlwjjreZrGRmG8KMOzukV3lLmMppXFMvl4bxv6YFEmIuTsOhbLTwFgh7KYNjodLj/LsqRVfwz31PgWQFTEPICV7GCvgVlPRxnofqKSjgTWI4mxDhBpVcATvaoBl1L/6WLbFvBsoAUBItWwctO2xalKxF5szhGm8lccoc5MZr8kfE0uxMgsxz4er68iCID+rsCAQM="
 	psiphonServerEntrySignaturePublicKey      = "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA="
 )
 
-// The path segment "mjr4-p23r-puwl" is part of the Psiphon client config and
-// has been unchanged since at least 2020. It is served from Amazon S3; the
-// disposable domain-fronting mirrors Psiphon ships are intentionally omitted.
 var psiphonRemoteServerListURLs = []string{
 	"https://s3.amazonaws.com/psiphon/web/mjr4-p23r-puwl/server_list_compressed",
 }
 
 const serverEntryListCacheFile = "/tmp/unroxy-psiphon/server_entries.txt"
 
-// loadServerEntries returns the latest signed server list. It always tries the
-// network first and falls back to the last successful download on disk.
 func loadServerEntries(ctx context.Context, logger *log.Logger) string {
 	data, err := fetchRemoteServerList(ctx)
 	if err == nil && strings.TrimSpace(data) != "" {

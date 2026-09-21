@@ -55,25 +55,6 @@ func (r *PoolRouter) Select(username string) *RotatingProxyTransport {
 	return nil
 }
 
-func (r *PoolRouter) Get(name string) *NamedPool {
-	if r == nil || name == "" {
-		return nil
-	}
-	upper := strings.ToUpper(name)
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, p := range r.pools {
-		if strings.ToUpper(p.Name) == upper {
-			return p
-		}
-	}
-	return nil
-}
-
-func (r *PoolRouter) Has(name string) bool {
-	return r.Get(name) != nil
-}
-
 func (r *PoolRouter) Default() http.RoundTripper {
 	if r == nil {
 		return nil
@@ -84,55 +65,38 @@ func (r *PoolRouter) Default() http.RoundTripper {
 	return r.defaultTransport
 }
 
-func (r *PoolRouter) Names() []string {
-	if r == nil {
-		return nil
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.pools))
-	for _, p := range r.pools {
-		names = append(names, p.Name)
-	}
-	return names
-}
-
-type PoolInfo struct {
+type poolInfo struct {
 	Name       string
 	ProxyCount int
 }
 
-type SystemStats struct {
-	Pools        []PoolInfo
+type systemStats struct {
+	Pools        []poolInfo
 	TotalProxies int
 }
 
-func (r *PoolRouter) Stats() SystemStats {
+func (r *PoolRouter) Stats() systemStats {
 	if r == nil {
-		return SystemStats{}
+		return systemStats{}
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	pools := make([]PoolInfo, 0, len(r.pools))
+	pools := make([]poolInfo, 0, len(r.pools))
 	total := 0
 	for _, p := range r.pools {
-		if strings.HasPrefix(strings.ToUpper(p.Name), "WARP") {
-			continue
-		}
 		count := 0
 		if p.Pool != nil {
 			count = p.Pool.Count()
 		}
-		pools = append(pools, PoolInfo{Name: p.Name, ProxyCount: count})
+		pools = append(pools, poolInfo{Name: p.Name, ProxyCount: count})
 		total += count
 	}
-	return SystemStats{Pools: pools, TotalProxies: total}
+	return systemStats{Pools: pools, TotalProxies: total}
 }
 
-func AuthUsername(r *http.Request) string {
+func authUsername(r *http.Request) string {
 	user, _, ok := r.BasicAuth()
 	if ok {
 		return user

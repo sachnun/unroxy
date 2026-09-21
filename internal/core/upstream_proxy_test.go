@@ -67,7 +67,7 @@ func TestProxyPoolCandidatesFailedForHostLast(t *testing.T) {
 	pool := &ProxyPool{
 		proxies: []*ProxyState{
 			{Key: "http://failed:80", URL: mustParseURL(t, "http://failed:80")},
-			{Key: "http://verified:80", URL: mustParseURL(t, "http://verified:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "http://verified:80", URL: mustParseURL(t, "http://verified:80")},
 			{Key: "http://untested:80", URL: mustParseURL(t, "http://untested:80")},
 		},
 		failedByHost: map[string]map[string]time.Time{
@@ -96,9 +96,9 @@ func TestProxyPoolCandidatesAllPresentNoHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*ProxyState{
-			{Key: "http://http:80", URL: mustParseURL(t, "http://http:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
-			{Key: "https://https:443", URL: mustParseURL(t, "https://https:443"), Healthy: true, LastChecked: now.Add(-time.Minute)},
-			{Key: "socks5://socks:1080", URL: mustParseURL(t, "socks5://socks:1080"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "http://http:80", URL: mustParseURL(t, "http://http:80")},
+			{Key: "https://https:443", URL: mustParseURL(t, "https://https:443")},
+			{Key: "socks5://socks:1080", URL: mustParseURL(t, "socks5://socks:1080")},
 		},
 	}
 
@@ -196,9 +196,9 @@ func TestProxyPoolCandidatesAllPresentWithHost(t *testing.T) {
 	now := time.Now()
 	pool := &ProxyPool{
 		proxies: []*ProxyState{
-			{Key: "http://global:80", URL: mustParseURL(t, "http://global:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
-			{Key: "http://host:80", URL: mustParseURL(t, "http://host:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
-			{Key: "http://probed:80", URL: mustParseURL(t, "http://probed:80"), Healthy: true, LastChecked: now.Add(-time.Minute)},
+			{Key: "http://global:80", URL: mustParseURL(t, "http://global:80")},
+			{Key: "http://host:80", URL: mustParseURL(t, "http://host:80")},
+			{Key: "http://probed:80", URL: mustParseURL(t, "http://probed:80")},
 		},
 	}
 
@@ -286,14 +286,11 @@ func TestRotatingProxyTransportRetriesProxyCandidatesOnRateLimit(t *testing.T) {
 	if directCalls != 0 {
 		t.Fatalf("expected 0 direct calls, got %d", directCalls)
 	}
-	healthyCount := 0
-	for _, p := range pool.proxies {
-		if p.Healthy {
-			healthyCount++
-		}
+	if pool.failCounts["https://blocked:443"] != 1 {
+		t.Fatalf("expected blocked proxy marked failed, got %v", pool.failCounts)
 	}
-	if healthyCount != 1 {
-		t.Fatalf("expected exactly 1 healthy proxy, got %d", healthyCount)
+	if _, still := pool.failedByHost["example.com"]["http://good:80"]; still {
+		t.Fatalf("expected good proxy failure cleared, got %v", pool.failedByHost)
 	}
 
 	output := logs.String()
@@ -471,7 +468,7 @@ func TestSetEgressHeadersFromCandidate(t *testing.T) {
 }
 
 func TestSetEgressHeadersPsiphonUsesTunnelInfo(t *testing.T) {
-	globalHostTunnels.Store("example.com", &tunnelInfo{ip: "198.51.100.4", region: "US", protocol: "ssh"})
+	globalHostTunnels.Store("example.com", &exitInfo{ip: "198.51.100.4", region: "US", protocol: "ssh"})
 	defer globalHostTunnels.Delete("example.com")
 
 	ispCacheMu.Lock()

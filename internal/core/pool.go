@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,35 +16,20 @@ type ProxyState struct {
 	Key         string
 	URL         *url.URL
 	Country     string
-	Latency     time.Duration
-	Healthy     bool
-	LastChecked time.Time
 	Priority    int
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	// ProbeFunc is an optional custom validator probe. Providers whose
-	// proxies burn credentials on CONNECT (e.g. Urban tokens) can install a
-	// cheaper check here; it takes precedence over the default CONNECT probe.
-	ProbeFunc func(ctx context.Context) (time.Duration, error)
-	Psiphon   *PsiphonDialer
-	// IP and ISP are the externally observed egress identity of the proxy,
-	// resolved during validation and exposed on responses as x-unroxy-ip /
-	// x-unroxy-isp.
-	IP  string
-	ISP string
-	// CountryVerified is true once the egress country has been confirmed
-	// against the observed exit IP (ipwho.is). Providers declare a country
-	// from their own lists, which can be wrong for shared infrastructure.
-	CountryVerified bool
+	Tunnel      *Dialer
+	IP          string
+	ISP         string
 }
 
 type ProxyCandidate struct {
 	Key         string
 	URL         *url.URL
 	Country     string
-	Latency     time.Duration
 	Priority    int
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	Psiphon     *PsiphonDialer
+	Tunnel      *Dialer
 	IP          string
 	ISP         string
 }
@@ -55,12 +41,9 @@ type ProxyPool struct {
 	proxies      []*ProxyState
 	failedByHost map[string]map[string]time.Time
 
-	// failCounts tracks consecutive real-traffic failures per proxy key.
-	// When a key reaches trafficFailThreshold, failureHook fires (outside
-	// the pool lock) so the validator can demote the proxy.
-	failCounts           map[string]int
-	trafficFailThreshold int
-	failureHook          func(key string)
+	failCounts map[string]int
+
+	rotation atomic.Uint64
 }
 
 func NewProxyPool(logger *log.Logger, proxies []*ProxyState) *ProxyPool {
@@ -74,18 +57,6 @@ func NewProxyPool(logger *log.Logger, proxies []*ProxyState) *ProxyPool {
 	}
 }
 
-func GroupProxiesByCountry(proxies []*ProxyState) map[string][]*ProxyState {
-	groups := make(map[string][]*ProxyState)
-	for _, p := range proxies {
-		code := p.Country
-		if code == "" {
-			code = "XX"
-		}
-		groups[code] = append(groups[code], p)
-	}
-	return groups
-}
-
 func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidate {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -96,9 +67,6 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidat
 
 	rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
 
-	// Snapshot the failed set: the shared failedByHost map is never
-	// mutated while holding only the read lock (concurrent deletes would
-	// race and can panic "concurrent map writes").
 	failedSet := make(map[string]bool, len(p.failedByHost[rotationKey]))
 	for key, failedAt := range p.failedByHost[rotationKey] {
 		if time.Since(failedAt) < FailureTTL {
@@ -118,10 +86,9 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidat
 			Key:         state.Key,
 			URL:         cloneURL(state.URL),
 			Country:     state.Country,
-			Latency:     state.Latency,
 			Priority:    state.Priority,
 			DialContext: state.DialContext,
-			Psiphon:     state.Psiphon,
+			Tunnel:      state.Tunnel,
 			IP:          state.IP,
 			ISP:         state.ISP,
 		}
@@ -134,32 +101,24 @@ func (p *ProxyPool) Candidates(now time.Time, targetHost string) []ProxyCandidat
 	}
 
 	sort.SliceStable(ready, func(i, j int) bool {
-		if ready[i].Priority != ready[j].Priority {
-			return ready[i].Priority < ready[j].Priority
-		}
-		return ready[i].Latency < ready[j].Latency
+		return ready[i].Priority < ready[j].Priority
 	})
 	sort.SliceStable(failed, func(i, j int) bool {
-		if failed[i].Priority != failed[j].Priority {
-			return failed[i].Priority < failed[j].Priority
-		}
-		return failed[i].Latency < failed[j].Latency
+		return failed[i].Priority < failed[j].Priority
 	})
+
+	if len(ready) > 1 {
+		off := int(p.rotation.Add(1)) % len(ready)
+		rotated := make([]ProxyCandidate, 0, len(ready))
+		rotated = append(rotated, ready[off:]...)
+		rotated = append(rotated, ready[:off]...)
+		ready = rotated
+	}
 
 	ordered := make([]ProxyCandidate, 0, len(p.proxies))
 	ordered = append(ordered, ready...)
 	ordered = append(ordered, failed...)
 	return ordered
-}
-
-// SetTrafficFailureHook registers a hook invoked (outside the pool lock)
-// whenever a proxy accumulates threshold consecutive failures from real
-// traffic. Pass threshold <= 0 to disable.
-func (p *ProxyPool) SetTrafficFailureHook(threshold int, fn func(key string)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.trafficFailThreshold = threshold
-	p.failureHook = fn
 }
 
 func (p *ProxyPool) MarkSuccess(key, targetHost string) {
@@ -171,8 +130,6 @@ func (p *ProxyPool) MarkSuccess(key, targetHost string) {
 			continue
 		}
 
-		state.Healthy = true
-		state.LastChecked = time.Now()
 		delete(p.failedByHost[strings.ToLower(strings.TrimSpace(targetHost))], key)
 		delete(p.failCounts, key)
 		return
@@ -181,15 +138,13 @@ func (p *ProxyPool) MarkSuccess(key, targetHost string) {
 
 func (p *ProxyPool) MarkFailure(key, targetHost string) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	var notify bool
 	for _, state := range p.proxies {
 		if state.Key != key {
 			continue
 		}
 
-		state.Healthy = false
-		state.LastChecked = time.Now()
 		rotationKey := strings.ToLower(strings.TrimSpace(targetHost))
 		if rotationKey != "" {
 			if p.failedByHost == nil {
@@ -205,18 +160,7 @@ func (p *ProxyPool) MarkFailure(key, targetHost string) {
 			p.failCounts = make(map[string]int)
 		}
 		p.failCounts[key]++
-		if p.failureHook != nil && p.trafficFailThreshold > 0 &&
-			p.failCounts[key] == p.trafficFailThreshold {
-			notify = true
-		}
 		break
-	}
-
-	hook := p.failureHook
-	p.mu.Unlock()
-
-	if notify && hook != nil {
-		hook(key)
 	}
 }
 
@@ -238,6 +182,12 @@ func (p *ProxyPool) Replace(proxies []*ProxyState) {
 func (p *ProxyPool) SetPrimary(primary *ProxyState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	for _, existing := range p.proxies {
+		if existing != nil && existing.Key == primary.Key {
+			return
+		}
+	}
 
 	cp := *primary
 	cp.Priority = 0
