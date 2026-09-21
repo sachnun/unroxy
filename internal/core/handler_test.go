@@ -2,256 +2,245 @@ package core
 
 import (
 	"bufio"
-	"context"
+	"encoding/base64"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
 
-func newProxyHandlerWithTransport(logger *log.Logger, transport http.RoundTripper) *ProxyHandler {
-	return &ProxyHandler{logger: logger, transport: transport}
-}
-
-func TestProxyHandler_ServeHTTP_InvalidPath(t *testing.T) {
-	h := NewProxyHandler(nil, nil)
-	req := httptest.NewRequest("GET", "/", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-	body := w.Body.String()
-	if body == "" {
-		t.Error("Expected non-empty response body")
-	}
-	if !strings.Contains(body, "Usage") {
-		t.Error("Expected body to contain 'Usage'")
-	}
-}
-
-func TestProxyHandler_ServeHTTP_RoutesCorrectly(t *testing.T) {
-	mock := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("ok")),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	})
-
-	tests := []struct {
-		name     string
-		buildReq func() *http.Request
-		wantCode int
-	}{
-		{
-			name: "CONNECT routes to tunnel handler",
-			buildReq: func() *http.Request {
-				return httptest.NewRequest(http.MethodConnect, "http://proxy.local/example.com:443", nil)
-			},
-			wantCode: http.StatusInternalServerError,
-		},
-		{
-			name: "absolute URI routes to forward proxy",
-			buildReq: func() *http.Request {
-				return httptest.NewRequest(http.MethodGet, "http://example.com/path", nil)
-			},
-			wantCode: http.StatusOK,
-		},
-		{
-			name: "relative path serves index page",
-			buildReq: func() *http.Request {
-				return httptest.NewRequest(http.MethodGet, "/", nil)
-			},
-			wantCode: http.StatusOK,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := newProxyHandlerWithTransport(nil, mock)
-			req := tt.buildReq()
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			if w.Code != tt.wantCode {
-				t.Errorf("Expected status %d, got %d", tt.wantCode, w.Code)
-			}
-		})
-	}
-}
-
-func TestProxyHandler_ForwardProxy_UnsupportedScheme(t *testing.T) {
-	h := newProxyHandlerWithTransport(nil, roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
+func TestForwardProxyDeliversRequestToOrigin(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Origin-Method", r.Method)
+		w.Header().Set("X-Origin-Path", r.URL.Path)
+		w.Header().Set("X-Origin-Query", r.URL.RawQuery)
+		body, _ := io.ReadAll(r.Body)
+		w.Write(body)
 	}))
+	defer origin.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "ftp://example.com/path", nil)
+	upstream := newUpstreamProxy()
+	defer upstream.Close()
+
+	handler := testHandler(t, testTransport(upstream.proxyState(t)))
+	client := proxyClient(t, handler)
+
+	resp, err := client.Post(origin.URL+"/search?q=hello", "text/plain", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("request through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "payload" {
+		t.Fatalf("body = %q, want %q", body, "payload")
+	}
+	if got := resp.Header.Get("X-Origin-Method"); got != http.MethodPost {
+		t.Fatalf("origin method = %q, want POST", got)
+	}
+	if got := resp.Header.Get("X-Origin-Path"); got != "/search" {
+		t.Fatalf("origin path = %q, want /search", got)
+	}
+	if got := resp.Header.Get("X-Origin-Query"); got != "q=hello" {
+		t.Fatalf("origin query = %q, want q=hello", got)
+	}
+	if !upstream.sawBody("payload") {
+		t.Fatalf("upstream proxy did not receive body, got %v", upstream.bodies)
+	}
+}
+
+func TestForwardProxyStripsSpoofedClientHeaders(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, h := range []string{"X-Real-IP", "X-Forwarded-Host", "X-Forwarded-Proto", "CF-Connecting-IP"} {
+			if v := r.Header.Get(h); v != "" {
+				w.Header().Set("Leaked-"+h, v)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+
+	upstream := newUpstreamProxy()
+	defer upstream.Close()
+
+	handler := testHandler(t, testTransport(upstream.proxyState(t)))
+	client := proxyClient(t, handler)
+
+	req, err := http.NewRequest(http.MethodGet, origin.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Real-IP", "9.9.9.9")
+	req.Header.Set("X-Forwarded-Host", "evil.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("CF-Connecting-IP", "9.9.9.9")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	for _, h := range []string{"Leaked-X-Real-IP", "Leaked-X-Forwarded-Host", "Leaked-X-Forwarded-Proto", "Leaked-CF-Connecting-IP"} {
+		if v := resp.Header.Get(h); v != "" {
+			t.Fatalf("spoofed header %s reached origin: %q", h, v)
+		}
+	}
+}
+
+func TestForwardProxyRejectsUnsupportedScheme(t *testing.T) {
+	handler := NewProxyHandler(log.New(io.Discard, "", 0), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "ftp://example.com/file", nil)
 	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
+	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400 for unsupported scheme, got %d", w.Code)
+		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
 
-func TestProxyHandler_ForwardProxy_ForwardsRequest(t *testing.T) {
-	var gotReq *http.Request
-	h := newProxyHandlerWithTransport(
-		log.New(io.Discard, "", 0),
-		roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			gotReq = req
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("forwarded")),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		}),
-	)
+func TestConnectTunnelThroughUpstreamProxy(t *testing.T) {
+	echoAddress := newEchoServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/search?q=hello", nil)
-	w := httptest.NewRecorder()
+	upstream := newUpstreamProxy()
+	defer upstream.Close()
 
-	h.ServeHTTP(w, req)
+	handler := testHandler(t, testTransport(upstream.proxyState(t)))
 
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	if gotReq == nil {
-		t.Fatal("Expected request to be forwarded")
-	}
-	if gotReq.URL.Host != "example.com" {
-		t.Errorf("Expected host example.com, got %s", gotReq.URL.Host)
-	}
-	if gotReq.URL.Scheme != "http" {
-		t.Errorf("Expected scheme http, got %s", gotReq.URL.Scheme)
-	}
-	if gotReq.URL.Path != "/search" {
-		t.Errorf("Expected path /search, got %s", gotReq.URL.Path)
-	}
-}
-
-func TestProxyHandler_ConnectTunnel(t *testing.T) {
-	serverEnd, clientEnd := net.Pipe()
-	defer clientEnd.Close()
-
-	pool := NewProxyPool(nil, []*ProxyState{{
-		Key: "test",
-		URL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return serverEnd, nil
-		},
-	}})
-	defaultTransport := NewRotatingProxyTransport(pool)
-	router := NewPoolRouter(nil, defaultTransport)
-	h := NewProxyHandler(log.New(io.Discard, "", 0), router)
-
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-
-	rawAddr := strings.TrimPrefix(srv.URL, "http://")
-	conn, err := net.Dial("tcp", rawAddr)
+	conn, err := netDial(handler.URL)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	if _, err := conn.Write([]byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")); err != nil {
-		t.Fatal(err)
+	if _, err := conn.Write([]byte("CONNECT " + echoAddress + " HTTP/1.1\r\nHost: " + echoAddress + "\r\n\r\n")); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read CONNECT response: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
 	}
 
 	if _, err := conn.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
+		t.Fatalf("write tunnel payload: %v", err)
 	}
 	got := make([]byte, 4)
-	if _, err := io.ReadFull(clientEnd, got); err != nil {
-		t.Fatal(err)
+	if _, err := io.ReadFull(reader, got); err != nil {
+		t.Fatalf("read tunnel echo: %v", err)
 	}
 	if string(got) != "ping" {
-		t.Fatalf("expected ping, got %q", got)
+		t.Fatalf("tunnel echo = %q, want ping", got)
 	}
 
-	if _, err := clientEnd.Write([]byte("pong")); err != nil {
-		t.Fatal(err)
-	}
-	got2 := make([]byte, 4)
-	if _, err := io.ReadFull(conn, got2); err != nil {
-		t.Fatal(err)
-	}
-	if string(got2) != "pong" {
-		t.Fatalf("expected pong, got %q", got2)
+	upstream.mu.Lock()
+	connects := append([]string(nil), upstream.connects...)
+	upstream.mu.Unlock()
+	if len(connects) != 1 || connects[0] != echoAddress {
+		t.Fatalf("upstream CONNECT targets = %v, want [%s]", connects, echoAddress)
 	}
 }
 
-func TestProxyHandler_ConnectTunnel_NoRotatingTransport(t *testing.T) {
-	h := NewProxyHandler(nil, nil)
+func TestConnectTunnelWithoutTransportFails(t *testing.T) {
 	req := httptest.NewRequest(http.MethodConnect, "http://proxy.local/example.com:443", nil)
 	w := httptest.NewRecorder()
 
-	h.ServeHTTP(w, req)
+	NewProxyHandler(log.New(io.Discard, "", 0), nil).ServeHTTP(w, req)
 
 	if w.Code != http.StatusInternalServerError {
-		t.Errorf("Expected status 500, got %d", w.Code)
+		t.Fatalf("status = %d, want 500", w.Code)
 	}
 }
 
-func TestNewProxyHandler(t *testing.T) {
-	h := NewProxyHandler(nil, nil)
+func TestRegionRoutingSelectsMatchingUpstream(t *testing.T) {
+	usProxy := newUpstreamProxy()
+	defer usProxy.Close()
+	usProxy.addHeader = http.Header{"X-Upstream-Region": []string{"us"}}
 
-	if h == nil {
-		t.Error("Expected non-nil handler")
-	}
-	if h.transport != nil {
-		t.Error("Expected nil transport by default")
-	}
-	if h.logger == nil {
-		t.Error("Expected non-nil logger")
-	}
-}
+	deProxy := newUpstreamProxy()
+	defer deProxy.Close()
+	deProxy.addHeader = http.Header{"X-Upstream-Region": []string{"de"}}
 
-func TestProxyHandlerDoesNotLogRequestDetails(t *testing.T) {
-	var logs strings.Builder
-	logger := log.New(&logs, "", 0)
-	h := newProxyHandlerWithTransport(logger, roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("ok")),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Echo-Region", r.Header.Get("X-Upstream-Region"))
+		w.WriteHeader(http.StatusOK)
 	}))
+	defer origin.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/example.com/search?q=hello", nil)
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "US", Username: "us", Pool: NewProxyPool(log.New(io.Discard, "", 0), []*ProxyState{usProxy.proxyState(t)}), Transport: testTransport(usProxy.proxyState(t))},
+		{Name: "DE", Username: "de", Pool: NewProxyPool(log.New(io.Discard, "", 0), []*ProxyState{deProxy.proxyState(t)}), Transport: testTransport(deProxy.proxyState(t))},
+	}, testTransport(usProxy.proxyState(t)))
+
+	handler := httptest.NewServer(NewProxyHandler(log.New(io.Discard, "", 0), router))
+	defer handler.Close()
+
+	for username, want := range map[string]string{"us": "us", "de": "de", "US": "us"} {
+		req, err := http.NewRequest(http.MethodGet, origin.URL+"/", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(username+":")))
+
+		resp, err := proxyClient(t, handler).Do(req)
+		if err != nil {
+			t.Fatalf("request as %q: %v", username, err)
+		}
+		region := resp.Header.Get("Echo-Region")
+		resp.Body.Close()
+		if region != want {
+			t.Fatalf("as %q: origin saw region %q, want %q", username, region, want)
+		}
+	}
+}
+
+func TestRegionRoutingUnknownUserFails(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "US", Username: "us", Transport: testTransport()},
+	}, testTransport())
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("nope:")))
 	w := httptest.NewRecorder()
 
-	h.ServeHTTP(w, req)
+	NewProxyHandler(log.New(io.Discard, "", 0), router).ServeHTTP(w, req)
 
-	output := logs.String()
-	if output != "" {
-		t.Fatalf("expected no request detail log, got %q", output)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
 	}
+}
+
+func TestIndexPageListsPools(t *testing.T) {
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "US", Username: "us", Pool: NewProxyPool(log.New(io.Discard, "", 0), []*ProxyState{
+			proxyStateURL(t, "a", "http://1.1.1.1:80"),
+			proxyStateURL(t, "b", "http://2.2.2.2:80"),
+		})},
+		{Name: "DE", Username: "de", Pool: NewProxyPool(log.New(io.Discard, "", 0), []*ProxyState{
+			proxyStateURL(t, "c", "http://3.3.3.3:80"),
+		})},
+	}, testTransport())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	NewProxyHandler(log.New(io.Discard, "", 0), router).ServeHTTP(w, req)
+
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"Usage", "US(2)", "DE(1)", "Total: 3 proxies"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("index page missing %q:\n%s", want, body)
+		}
 	}
 }
