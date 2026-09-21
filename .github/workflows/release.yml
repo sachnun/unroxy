@@ -33,7 +33,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -short -ldflags=-checklinkname=0 ./...
+      - run: go test -short ./...
 
   build:
     needs: test

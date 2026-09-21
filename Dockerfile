@@ -8,7 +8,7 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -tags "PSIPHON_DISABLE_INPROXY PSIPHON_DISABLE_QUIC PSIPHON_DISABLE_GQUIC" \
-    -ldflags="-s -w -checklinkname=0" -o /out/unroxy ./cmd/unroxy
+    -ldflags="-s -w" -o /out/unroxy ./cmd/unroxy
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
