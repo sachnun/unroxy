@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main, psiphon-only]
+    branches: [main, beta]
     paths:
       - cmd/**
       - internal/**
@@ -78,8 +78,10 @@ jobs:
         with:
           images: ghcr.io/sachnun/unroxy
           tags: |
-            type=raw,value=latest
-            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=beta,enable=${{ github.ref == 'refs/heads/beta' }}
+            type=sha,format=short,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=beta-,format=short,enable=${{ github.ref == 'refs/heads/beta' }}
       - uses: docker/build-push-action@v6
         with:
           platforms: linux/amd64,linux/arm64
