@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, psiphon-only]
     paths:
       - cmd/**
       - internal/**
