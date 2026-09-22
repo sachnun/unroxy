@@ -3,10 +3,9 @@ package core
 import (
 	"context"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"sort"
 	"testing"
 	"time"
 )
@@ -43,11 +42,9 @@ func TestTransportRoutesRequestsThroughProxy(t *testing.T) {
 	}
 }
 
-func TestTransportRetriesRateLimitedProxyAndReplaysBody(t *testing.T) {
+func TestTransportUsesOneCandidatePerRequest(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		w.Header().Set("Echo-Via", r.Header.Get("X-Via-Proxy"))
-		w.Write(body)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer origin.Close()
 
@@ -57,82 +54,35 @@ func TestTransportRetriesRateLimitedProxyAndReplaysBody(t *testing.T) {
 
 	good := newUpstreamProxy()
 	defer good.Close()
-	good.addHeader = http.Header{"X-Via-Proxy": []string{"good"}}
 
-	goodState := good.proxyState(t)
-	goodState.Priority = 1
-	pool := NewProxyPool(log.New(io.Discard, "", 0), []*ProxyState{
-		blocked.proxyState(t),
-		goodState,
-	})
-	pool.failedByHost = map[string]map[string]time.Time{
-		"127.0.0.1": {goodState.Key: time.Now()},
-	}
-	transport := NewRotatingProxyTransport(pool)
+	transport := testTransport(blocked.proxyState(t), good.proxyState(t))
 
-	req, err := http.NewRequest(http.MethodPost, origin.URL+"/submit", strings.NewReader("hello"))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "hello" {
-		t.Fatalf("final body = %q, want hello", body)
-	}
-	if got := resp.Header.Get("Echo-Via"); got != "good" {
-		t.Fatalf("Echo-Via = %q, want good", got)
-	}
-	if !blocked.sawBody("hello") {
-		t.Fatalf("rate limited proxy did not see body, got %v", blocked.bodies)
-	}
-	if !good.sawBody("hello") {
-		t.Fatalf("good proxy did not see replayed body, got %v", good.bodies)
-	}
-}
-
-func TestTransportFailsWhenAllProxiesRateLimited(t *testing.T) {
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer origin.Close()
-
-	first := newUpstreamProxy()
-	defer first.Close()
-	first.onRequest = func(*http.Request) (int, bool) { return http.StatusTooManyRequests, true }
-
-	second := newUpstreamProxy()
-	defer second.Close()
-	second.onRequest = func(*http.Request) (int, bool) { return http.StatusTooManyRequests, true }
-
-	transport := testTransport(first.proxyState(t), second.proxyState(t))
-
-	req, err := http.NewRequest(http.MethodGet, origin.URL+"/", nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-
-	resp, err := transport.RoundTrip(req)
-	if resp != nil {
+	statuses := make([]int, 0, 2)
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequest(http.MethodGet, origin.URL+"/", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
 		resp.Body.Close()
-		t.Fatalf("expected no response, got status %d", resp.StatusCode)
+		statuses = append(statuses, resp.StatusCode)
 	}
-	if err == nil {
-		t.Fatal("expected error when all proxies are rate limited")
+	sort.Ints(statuses)
+	if statuses[0] != http.StatusOK || statuses[1] != http.StatusTooManyRequests {
+		t.Fatalf("statuses = %v, want [200 429]", statuses)
 	}
 
-	first.mu.Lock()
-	second.mu.Lock()
-	firstCalls, secondCalls := len(first.requests), len(second.requests)
-	first.mu.Unlock()
-	second.mu.Unlock()
-	if firstCalls != 1 || secondCalls != 1 {
-		t.Fatalf("calls = (%d, %d), want (1, 1)", firstCalls, secondCalls)
+	blocked.mu.Lock()
+	blockedCalls := len(blocked.requests)
+	blocked.mu.Unlock()
+	good.mu.Lock()
+	goodCalls := len(good.requests)
+	good.mu.Unlock()
+	if blockedCalls != 1 || goodCalls != 1 {
+		t.Fatalf("proxy calls = (%d, %d), want (1, 1): a rate limited response must not fail over", blockedCalls, goodCalls)
 	}
 }
 

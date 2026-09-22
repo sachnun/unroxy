@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -40,112 +38,61 @@ func NewRotatingProxyTransport(pool *ProxyPool) *RotatingProxyTransport {
 }
 
 func (t *RotatingProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	body, hasBody, err := snapshotRequestBody(req)
-	if err != nil {
-		return nil, err
+	if t.pool == nil {
+		return nil, errNoUpstreamProxy
 	}
 
 	targetHost := requestTargetHost(req)
-	return t.roundTripViaProxy(req, body, hasBody, targetHost)
-}
-
-func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byte, hasBody bool, targetHost string) (*http.Response, error) {
-	if t.pool == nil {
+	candidate, ok := t.readyCandidate(req.Context(), targetHost)
+	if !ok {
 		return nil, errNoUpstreamProxy
 	}
 
 	logger := t.transportLogger()
 	targetLog := requestTargetLog(req)
 
-	candidates := t.readyCandidates(req.Context(), targetHost)
-	if len(candidates) == 0 {
-		return nil, errNoUpstreamProxy
-	}
+	attemptReq := requestWithCandidate(req, candidate)
+	var resp *http.Response
+	var err error
 
-	var lastErr error
-	for _, candidate := range candidates {
-		attemptReq := cloneRequestForProxy(req, candidate.URL, body, hasBody)
-		if candidate.DialContext != nil {
-			attemptReq = attemptReq.WithContext(context.WithValue(attemptReq.Context(), proxyDialerKey{}, true))
-		}
-		var resp *http.Response
-		var err error
-
-		if candidate.DialContext != nil {
-			if isTunnelCandidate(candidate) {
-				v, _ := t.dialTransports.LoadOrStore("tunnel:"+candidate.Key, &http.Transport{
-					DialContext:           candidate.DialContext,
-					DisableKeepAlives:     true,
-					ForceAttemptHTTP2:     false,
-					MaxIdleConns:          10,
-					IdleConnTimeout:       90 * time.Second,
-					TLSHandshakeTimeout:   10 * time.Second,
-					ResponseHeaderTimeout: HeaderTimeout,
-				})
-				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
-			} else {
-				v, _ := t.dialTransports.LoadOrStore(candidate.Key, newUTLSTransport(candidate.DialContext))
-				resp, err = v.(*http.Transport).RoundTrip(attemptReq)
-			}
-		} else {
-			resp, err = t.transport.RoundTrip(attemptReq)
-		}
-
-		var ti *exitInfo
+	if candidate.DialContext != nil {
 		if isTunnelCandidate(candidate) {
-			ti = exitFor(targetHost)
+			v, _ := t.dialTransports.LoadOrStore("tunnel:"+candidate.Key, &http.Transport{
+				DialContext:           candidate.DialContext,
+				DisableKeepAlives:     true,
+				ForceAttemptHTTP2:     false,
+				MaxIdleConns:          10,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: HeaderTimeout,
+			})
+			resp, err = v.(*http.Transport).RoundTrip(attemptReq)
+		} else {
+			v, _ := t.dialTransports.LoadOrStore(candidate.Key, newUTLSTransport(candidate.DialContext))
+			resp, err = v.(*http.Transport).RoundTrip(attemptReq)
 		}
+	} else {
+		resp, err = t.transport.RoundTrip(attemptReq)
+	}
 
-		proto := candidateProtoPrefix(ti)
-		if err != nil {
-			if errors.Is(err, errNotReady) {
-				continue
-			}
-			if req.Context().Err() != nil {
-				lastErr = err
-				break
-			}
-			if isHostUnreachable(err) {
-				if !isTunnelCandidate(candidate) {
-					t.pool.MarkFailure(candidate.Key, targetHost)
-				}
-				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
-				lastErr = err
-				break
-			}
-			if isTunnelCandidate(candidate) {
-				logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
-				lastErr = err
-				continue
-			}
+	var ti *exitInfo
+	if isTunnelCandidate(candidate) {
+		ti = exitFor(targetHost)
+	}
+
+	proto := candidateProtoPrefix(ti)
+	if err != nil {
+		if !isTunnelCandidate(candidate) {
 			t.pool.MarkFailure(candidate.Key, targetHost)
-			logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
-			lastErr = err
-			continue
 		}
-
-		if shouldRetryStatus(resp.StatusCode) {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			if !isTunnelCandidate(candidate) {
-				t.pool.MarkFailure(candidate.Key, targetHost)
-			}
-			logger.Printf("[RETRY]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
-			lastErr = fmt.Errorf("origin returned retriable status %d via %s", resp.StatusCode, candidate.Key)
-			continue
-		}
-
-		t.pool.MarkSuccess(candidate.Key, targetHost)
-		logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
-		t.setEgressHeaders(resp, candidate, targetHost)
-		return resp, nil
+		logger.Printf("[ERR]%s %s -> %s (%v)", proto, targetLog, candidateLogAddress(candidate, ti), err)
+		return nil, err
 	}
 
-	if lastErr == nil {
-		lastErr = errNoUpstreamProxy
-	}
-
-	return nil, lastErr
+	t.pool.MarkSuccess(candidate.Key, targetHost)
+	logger.Printf("[OK]%s %s -> %s (%d)", proto, targetLog, candidateLogAddress(candidate, ti), resp.StatusCode)
+	t.setEgressHeaders(resp, candidate, targetHost)
+	return resp, nil
 }
 
 func (t *RotatingProxyTransport) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -173,66 +120,55 @@ func (t *RotatingProxyTransport) dialThroughPool(ctx context.Context, network, a
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
 
-	candidates := t.readyCandidates(ctx, targetHost)
-	for _, candidate := range candidates {
-		var conn net.Conn
-		var err error
-		if candidate.DialContext != nil {
-			conn, err = candidate.DialContext(ctx, network, addr)
-		} else {
-			conn, err = httpProxyConnect(ctx, candidate.URL, addr)
-		}
-
-		var ti *exitInfo
-		if isTunnelCandidate(candidate) {
-			host, _, _ := net.SplitHostPort(addr)
-			ti = exitFor(host)
-		}
-
-		proto := candidateProtoPrefix(ti)
-		if err != nil {
-			if errors.Is(err, errNotReady) {
-				continue
-			}
-			if ctx.Err() != nil {
-				break
-			}
-			if isHostUnreachable(err) {
-				if !isTunnelCandidate(candidate) {
-					t.pool.MarkFailure(candidate.Key, targetHost)
-				}
-				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
-				break
-			}
-			if isTunnelCandidate(candidate) {
-				logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
-				continue
-			}
-			t.pool.MarkFailure(candidate.Key, targetHost)
-			logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
-			continue
-		}
-
-		t.pool.MarkSuccess(candidate.Key, targetHost)
-		logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate, ti))
-		return conn, true
+	candidate, ok := t.readyCandidate(ctx, targetHost)
+	if !ok {
+		return nil, false
 	}
 
-	return nil, false
+	var conn net.Conn
+	var err error
+	if candidate.DialContext != nil {
+		conn, err = candidate.DialContext(ctx, network, addr)
+	} else {
+		conn, err = httpProxyConnect(ctx, candidate.URL, addr)
+	}
+
+	var ti *exitInfo
+	if isTunnelCandidate(candidate) {
+		host, _, _ := net.SplitHostPort(addr)
+		ti = exitFor(host)
+	}
+
+	proto := candidateProtoPrefix(ti)
+	if err != nil {
+		if !isTunnelCandidate(candidate) {
+			t.pool.MarkFailure(candidate.Key, targetHost)
+		}
+		logger.Printf("[ERR]%s CONNECT %s -> %s (%v)", proto, addr, candidateLogAddress(candidate, ti), err)
+		return nil, false
+	}
+
+	t.pool.MarkSuccess(candidate.Key, targetHost)
+	logger.Printf("[OK]%s CONNECT %s -> %s", proto, addr, candidateLogAddress(candidate, ti))
+	return conn, true
 }
 
-func (t *RotatingProxyTransport) readyCandidates(ctx context.Context, targetHost string) []ProxyCandidate {
-	candidates := t.pool.Candidates(time.Now(), targetHost)
+func (t *RotatingProxyTransport) readyCandidate(ctx context.Context, targetHost string) (ProxyCandidate, bool) {
 	deadline := time.Now().Add(notReadyWait)
-	for len(candidates) > 0 && !hasReadyTunnel(candidates) && time.Now().Before(deadline) {
+	for {
+		candidates := t.pool.Candidates(time.Now(), targetHost)
+		if len(candidates) == 0 {
+			return ProxyCandidate{}, false
+		}
+		if hasReadyTunnel(candidates) || !time.Now().Before(deadline) {
+			return candidates[0], true
+		}
 		select {
 		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
-			return candidates
+			return candidates[0], true
 		}
-		candidates = t.pool.Candidates(time.Now(), targetHost)
 	}
-	return candidates
 }
 
 func hasReadyTunnel(candidates []ProxyCandidate) bool {
@@ -322,47 +258,15 @@ func newProxyAwareTransport() http.RoundTripper {
 	return newUTLSTransport(dialer.DialContext)
 }
 
-func snapshotRequestBody(req *http.Request) ([]byte, bool, error) {
-	if req.Body == nil || req.Body == http.NoBody {
-		return nil, false, nil
-	}
-
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, true, err
-	}
-	if err := req.Body.Close(); err != nil {
-		return nil, true, err
-	}
-
-	setRequestBody(req, body)
-	return body, true, nil
-}
-
-func setRequestBody(req *http.Request, body []byte) {
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(body)), nil
-	}
-	req.ContentLength = int64(len(body))
-}
-
-func cloneRequestForProxy(req *http.Request, proxyURL *url.URL, body []byte, hasBody bool) *http.Request {
+func requestWithCandidate(req *http.Request, candidate ProxyCandidate) *http.Request {
 	ctx := req.Context()
-	if proxyURL != nil {
-		ctx = context.WithValue(ctx, proxyContextKey{}, proxyURL)
+	if candidate.URL != nil {
+		ctx = context.WithValue(ctx, proxyContextKey{}, candidate.URL)
 	}
-
-	attemptReq := req.Clone(ctx)
-
-	if hasBody {
-		setRequestBody(attemptReq, body)
-	} else {
-		attemptReq.Body = nil
-		attemptReq.GetBody = nil
+	if candidate.DialContext != nil {
+		ctx = context.WithValue(ctx, proxyDialerKey{}, true)
 	}
-
-	return attemptReq
+	return req.Clone(ctx)
 }
 
 func requestTargetHost(req *http.Request) string {
@@ -408,10 +312,6 @@ func extractHost(addr string) string {
 		return addr
 	}
 	return strings.ToLower(host)
-}
-
-func shouldRetryStatus(statusCode int) bool {
-	return statusCode == http.StatusTooManyRequests
 }
 
 func isHostUnreachable(err error) bool {

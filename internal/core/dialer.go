@@ -20,8 +20,6 @@ var serverEntryList string
 
 var errNotReady = errors.New("psiphon not ready")
 
-const dialAttempts = 3
-
 const MaxTunnelsPerRegion = 3
 
 type Dialer struct {
@@ -165,30 +163,28 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	if d.tunnelReady.Load() == 0 && d.targetPool > 0 {
 		return nil, errNotReady
 	}
-	var lastErr error
-	for i := 0; i < dialAttempts; i++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		conn, err := d.controller.Dial(addr, nil)
-		if err == nil {
-			host, _, _ := net.SplitHostPort(addr)
-			serverIP := serverIDFromConn(conn)
-			for _, e := range d.serverEntries {
-				if e.ip == serverIP {
-					proto := ""
-					if v, ok := protocolByIP.Load(serverIP); ok {
-						proto, _ = v.(string)
-					}
-					globalHostTunnels.Store(host, &exitInfo{ip: e.ip, region: e.region, protocol: proto})
-					break
-				}
-			}
-			return conn, nil
-		}
-		lastErr = err
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+
+	conn, err := d.controller.Dial(addr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	host, _, _ := net.SplitHostPort(addr)
+	serverIP := serverIDFromConn(conn)
+	for _, e := range d.serverEntries {
+		if e.ip == serverIP {
+			proto := ""
+			if v, ok := protocolByIP.Load(serverIP); ok {
+				proto, _ = v.(string)
+			}
+			globalHostTunnels.Store(host, &exitInfo{ip: e.ip, region: e.region, protocol: proto})
+			break
+		}
+	}
+	return conn, nil
 }
 
 func (d *Dialer) startTunnelRefresh(ctx context.Context, interval time.Duration, count int, logger *log.Logger) {
