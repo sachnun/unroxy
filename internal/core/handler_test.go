@@ -313,3 +313,22 @@ func TestIndexPageListsPools(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexPageReportsTunnelProxies(t *testing.T) {
+	tunnel := proxyStateURL(t, "a", "http://1.1.1.1:80")
+	tunnel.Tunnel = &Dialer{targetPool: 3}
+	router := NewPoolRouter([]*NamedPool{
+		{Name: "US", Pool: newTestPool(tunnel)},
+	}, testTransport())
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	NewProxyHandler(log.New(io.Discard, "", 0), router).ServeHTTP(w, req)
+
+	body := w.Body.String()
+	for _, want := range []string{"US(3)", "Total: 3 proxies, 1 controllers"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("index page missing %q:\n%s", want, body)
+		}
+	}
+}

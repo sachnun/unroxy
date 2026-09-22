@@ -80,7 +80,11 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 			buf.WriteString("─────\n")
 			const colWidth = 12
 			for i, p := range stats.Pools {
-				entry := fmt.Sprintf("%s(%d)", p.Name, p.ProxyCount)
+				count := p.ProxyCount
+				if p.TunnelCount > 0 {
+					count = p.TunnelCount
+				}
+				entry := fmt.Sprintf("%s(%d)", p.Name, count)
 				if i%5 == 0 {
 					fmt.Fprintf(&buf, "  %-*s", -colWidth, entry)
 				} else {
@@ -90,7 +94,11 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 					buf.WriteString("\n")
 				}
 			}
-			fmt.Fprintf(&buf, "\nTotal: %d proxies\n", stats.TotalProxies)
+			if stats.TotalTunnels > 0 {
+				fmt.Fprintf(&buf, "\nTotal: %d proxies, %d controllers\n", stats.TotalTunnels, stats.TotalProxies)
+			} else {
+				fmt.Fprintf(&buf, "\nTotal: %d proxies\n", stats.TotalProxies)
+			}
 		}
 	}
 

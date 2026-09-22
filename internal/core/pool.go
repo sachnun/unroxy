@@ -170,6 +170,19 @@ func (p *ProxyPool) Count() int {
 	return len(p.proxies)
 }
 
+func (p *ProxyPool) TunnelCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	tunnels := 0
+	for _, state := range p.proxies {
+		if state != nil && state.Tunnel != nil {
+			tunnels += state.Tunnel.TargetPool()
+		}
+	}
+	return tunnels
+}
+
 func (p *ProxyPool) Replace(proxies []*ProxyState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

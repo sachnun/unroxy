@@ -124,3 +124,14 @@ func TestPoolSetPrimaryPrepends(t *testing.T) {
 		t.Fatalf("first proxy = %q, want a", pool.proxies[0].Key)
 	}
 }
+
+func TestPoolTunnelCount(t *testing.T) {
+	withTunnel := proxyStateURL(t, "a", "http://1.1.1.1:80")
+	withTunnel.Tunnel = &Dialer{targetPool: 4}
+
+	pool := newTestPool(withTunnel, proxyStateURL(t, "b", "http://2.2.2.2:80"))
+
+	if got := pool.TunnelCount(); got != 4 {
+		t.Fatalf("TunnelCount = %d, want 4", got)
+	}
+}
