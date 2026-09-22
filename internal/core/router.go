@@ -83,12 +83,14 @@ type poolInfo struct {
 	Name        string
 	ProxyCount  int
 	TunnelCount int
+	UsableCount int
 }
 
 type systemStats struct {
 	Pools        []poolInfo
 	TotalProxies int
 	TotalTunnels int
+	TotalUsable  int
 }
 
 func (r *PoolRouter) Stats() systemStats {
@@ -102,18 +104,26 @@ func (r *PoolRouter) Stats() systemStats {
 	pools := make([]poolInfo, 0, len(r.pools))
 	total := 0
 	totalTunnels := 0
+	totalUsable := 0
 	for _, p := range r.pools {
 		count := 0
 		tunnels := 0
+		usable := 0
 		if p.Pool != nil {
 			count = p.Pool.Count()
 			tunnels = p.Pool.TunnelCount()
+			usable = p.Pool.UsableCount()
 		}
-		pools = append(pools, poolInfo{Name: p.Name, ProxyCount: count, TunnelCount: tunnels})
+		pools = append(pools, poolInfo{
+			Name: p.Name, ProxyCount: count, TunnelCount: tunnels, UsableCount: usable,
+		})
 		total += count
 		totalTunnels += tunnels
+		totalUsable += usable
 	}
-	return systemStats{Pools: pools, TotalProxies: total, TotalTunnels: totalTunnels}
+	return systemStats{
+		Pools: pools, TotalProxies: total, TotalTunnels: totalTunnels, TotalUsable: totalUsable,
+	}
 }
 
 func authUsername(r *http.Request) string {

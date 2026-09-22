@@ -326,7 +326,7 @@ func TestIndexPageReportsTunnelProxies(t *testing.T) {
 	NewProxyHandler(log.New(io.Discard, "", 0), router).ServeHTTP(w, req)
 
 	body := w.Body.String()
-	for _, want := range []string{"US(3)", "Total: 3 proxies, 1 controllers"} {
+	for _, want := range []string{"US(0/3)", "Total: 0/3 usable"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("index page missing %q:\n%s", want, body)
 		}

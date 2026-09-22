@@ -183,6 +183,24 @@ func (p *ProxyPool) TunnelCount() int {
 	return tunnels
 }
 
+func (p *ProxyPool) UsableCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	usable := 0
+	for _, state := range p.proxies {
+		if state == nil {
+			continue
+		}
+		if state.Tunnel == nil {
+			usable++
+			continue
+		}
+		usable += state.Tunnel.ActiveTunnels()
+	}
+	return usable
+}
+
 func (p *ProxyPool) Replace(proxies []*ProxyState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

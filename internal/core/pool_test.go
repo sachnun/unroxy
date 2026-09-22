@@ -134,4 +134,7 @@ func TestPoolTunnelCount(t *testing.T) {
 	if got := pool.TunnelCount(); got != 4 {
 		t.Fatalf("TunnelCount = %d, want 4", got)
 	}
+	if got := pool.UsableCount(); got != 1 {
+		t.Fatalf("UsableCount = %d, want 1", got)
+	}
 }

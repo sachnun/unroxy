@@ -144,6 +144,21 @@ func (d *Dialer) Region() string  { return d.region }
 func (d *Dialer) TargetPool() int { return d.targetPool }
 func (d *Dialer) IsReady() bool   { return d.tunnelReady.Load() > 0 }
 
+func (d *Dialer) ActiveTunnels() int {
+	if d == nil || d.controller == nil {
+		return 0
+	}
+	v := reflect.ValueOf(d.controller)
+	if v.Kind() != reflect.Ptr || v.IsNil() {
+		return 0
+	}
+	tunnels := v.Elem().FieldByName("tunnels")
+	if !tunnels.IsValid() || tunnels.Kind() != reflect.Slice {
+		return 0
+	}
+	return tunnels.Len()
+}
+
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d.tunnelReady.Load() == 0 && d.targetPool > 0 {
 		return nil, errNotReady
