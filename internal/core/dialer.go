@@ -22,7 +22,7 @@ var errNotReady = errors.New("psiphon not ready")
 
 const dialAttempts = 3
 
-const MaxTunnelsPerRegion = 2
+const MaxTunnelsPerRegion = 3
 
 type Dialer struct {
 	id          string
@@ -135,8 +135,8 @@ func NewDialer(id, region string, entries []ServerEntry, logger *log.Logger) (*D
 
 	go controller.Run(ctx)
 
-	refreshInterval := 30 * time.Minute
-	refreshCount := max(1, d.targetPool/3)
+	refreshInterval := 5 * time.Minute
+	refreshCount := 1
 	d.startTunnelRefresh(ctx, refreshInterval, refreshCount, logger)
 
 	return d, nil

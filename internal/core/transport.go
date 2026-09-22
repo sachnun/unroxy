@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+const notReadyWait = 30 * time.Second
+
 type RotatingProxyTransport struct {
 	logger         *log.Logger
 	pool           *ProxyPool
@@ -55,8 +57,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 	logger := t.transportLogger()
 	targetLog := requestTargetLog(req)
 
-	now := time.Now()
-	candidates := t.pool.Candidates(now, targetHost)
+	candidates := t.readyCandidates(req.Context(), targetHost)
 	if len(candidates) == 0 {
 		return nil, errNoUpstreamProxy
 	}
@@ -172,7 +173,7 @@ func (t *RotatingProxyTransport) dialThroughPool(ctx context.Context, network, a
 	targetHost := extractHost(addr)
 	logger := t.transportLogger()
 
-	candidates := t.pool.Candidates(time.Now(), targetHost)
+	candidates := t.readyCandidates(ctx, targetHost)
 	for _, candidate := range candidates {
 		var conn net.Conn
 		var err error
@@ -218,6 +219,29 @@ func (t *RotatingProxyTransport) dialThroughPool(ctx context.Context, network, a
 	}
 
 	return nil, false
+}
+
+func (t *RotatingProxyTransport) readyCandidates(ctx context.Context, targetHost string) []ProxyCandidate {
+	candidates := t.pool.Candidates(time.Now(), targetHost)
+	deadline := time.Now().Add(notReadyWait)
+	for len(candidates) > 0 && !hasReadyTunnel(candidates) && time.Now().Before(deadline) {
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return candidates
+		}
+		candidates = t.pool.Candidates(time.Now(), targetHost)
+	}
+	return candidates
+}
+
+func hasReadyTunnel(candidates []ProxyCandidate) bool {
+	for _, candidate := range candidates {
+		if candidate.Tunnel == nil || candidate.Tunnel.IsReady() {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *RotatingProxyTransport) transportLogger() *log.Logger {
