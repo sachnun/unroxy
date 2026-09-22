@@ -2,15 +2,12 @@ package psiphon
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 
 	"unroxy/internal/core"
 	"unroxy/internal/providers"
 )
-
-const maxTunnelsPerController = 32
 
 func Start(ctx context.Context, host *providers.Host, logger *log.Logger) error {
 	core.InitNotices(logger)
@@ -27,17 +24,13 @@ func Start(ctx context.Context, host *providers.Host, logger *log.Logger) error 
 	var wg sync.WaitGroup
 
 	for region, entries := range byRegion {
-		for i := 0; i < len(entries); i += maxTunnelsPerController {
-			end := min(i+maxTunnelsPerController, len(entries))
-			chunk := entries[i:end]
-			id := fmt.Sprintf("%s#%d", region, i/maxTunnelsPerController)
-			wg.Add(1)
-			go func(id, region string, chunk []core.ServerEntry) {
-				defer wg.Done()
-				dialer, err := core.NewDialer(id, region, chunk, logger)
-				ch <- result{id: id, dialer: dialer, err: err}
-			}(id, region, chunk)
-		}
+		id := region
+		wg.Add(1)
+		go func(id, region string, entries []core.ServerEntry) {
+			defer wg.Done()
+			dialer, err := core.NewDialer(id, region, entries, logger)
+			ch <- result{id: id, dialer: dialer, err: err}
+		}(id, region, entries)
 	}
 
 	go func() {
