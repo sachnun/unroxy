@@ -22,7 +22,7 @@ var errNotReady = errors.New("psiphon not ready")
 
 const dialAttempts = 3
 
-const MaxTunnelsPerRegion = 1
+const MaxTunnelsPerRegion = 2
 
 type Dialer struct {
 	id          string
