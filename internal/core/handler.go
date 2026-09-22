@@ -70,8 +70,8 @@ func (h *ProxyHandler) writeIndexPage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&buf, "  HTTP      curl -x http://%s http://ipwho.is\n", host)
 	fmt.Fprintf(&buf, "  CONNECT   curl -x http://%s https://ipwho.is\n", host)
 	fmt.Fprintf(&buf, "  Region    curl -x http://us@%s https://ipwho.is\n", host)
-	fmt.Fprintf(&buf, "  Rewrite   curl http://%s/ipwho.is/path\n", host)
-	fmt.Fprintf(&buf, "            curl http://%s/https://ipwho.is/path\n", host)
+	fmt.Fprintf(&buf, "  Rewrite   curl http://%s/ipwho.is\n", host)
+	fmt.Fprintf(&buf, "            curl http://%s/https://ipwho.is\n", host)
 
 	if h.router != nil {
 		stats := h.router.Stats()
