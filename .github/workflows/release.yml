@@ -89,3 +89,51 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: ${{ steps.meta.outputs.tags }}
+
+  deploy:
+    needs: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: proxy
+    env:
+      KOYEB_APP: ${{ vars.KOYEB_APP }}
+      KOYEB_SERVICE: ${{ vars.KOYEB_SERVICE }}
+      KOYEB_REGION: ${{ vars.KOYEB_REGION }}
+      KOYEB_INSTANCE_TYPE: ${{ vars.KOYEB_INSTANCE_TYPE }}
+      KOYEB_ORG_ID: ${{ vars.KOYEB_ORG_ID }}
+      KOYEB_TOKEN: ${{ secrets.KOYEB_TOKEN }}
+    steps:
+      - name: Install Koyeb CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/koyeb/koyeb-cli/master/install.sh | sh
+          echo "$HOME/.koyeb/bin" >> "$GITHUB_PATH"
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          export KOYEB_TOKEN
+          TAG="beta-${GITHUB_SHA:0:7}"
+          ORG=(--organization "$KOYEB_ORG_ID")
+          COMMON_ARGS=(
+            --docker "ghcr.io/$GITHUB_REPOSITORY:$TAG"
+            --type web
+            --instance-type "$KOYEB_INSTANCE_TYPE"
+            --regions "$KOYEB_REGION"
+            --ports 8080:http
+            --routes "/:8080"
+            --checks "8080:tcp"
+            --checks-grace-period "8080=30"
+          )
+          if [ "$KOYEB_INSTANCE_TYPE" = "free" ]; then
+            SCALE_ARGS=(--min-scale 0 --max-scale 1)
+          else
+            SCALE_ARGS=(--min-scale 1 --max-scale 1)
+          fi
+          if ! koyeb apps get "$KOYEB_APP" "${ORG[@]}" >/dev/null 2>&1; then
+            koyeb apps create "$KOYEB_APP" "${ORG[@]}"
+          fi
+          if koyeb services get "$KOYEB_SERVICE" --app "$KOYEB_APP" "${ORG[@]}" >/dev/null 2>&1; then
+            koyeb services update "$KOYEB_APP/$KOYEB_SERVICE" "${ORG[@]}" "${COMMON_ARGS[@]}" "${SCALE_ARGS[@]}" --override --wait --wait-timeout 10m
+          else
+            koyeb services create "$KOYEB_SERVICE" --app "$KOYEB_APP" "${ORG[@]}" "${COMMON_ARGS[@]}" "${SCALE_ARGS[@]}" --wait --wait-timeout 10m
+          fi
