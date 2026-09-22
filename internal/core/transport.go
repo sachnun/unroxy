@@ -74,6 +74,7 @@ func (t *RotatingProxyTransport) roundTripViaProxy(req *http.Request, body []byt
 			if isTunnelCandidate(candidate) {
 				v, _ := t.dialTransports.LoadOrStore("tunnel:"+candidate.Key, &http.Transport{
 					DialContext:           candidate.DialContext,
+					DisableKeepAlives:     true,
 					ForceAttemptHTTP2:     false,
 					MaxIdleConns:          10,
 					IdleConnTimeout:       90 * time.Second,
