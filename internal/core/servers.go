@@ -52,6 +52,7 @@ func decodeEntry(line string) (id, ip, region string, ok bool) {
 	var entry struct {
 		IpAddress       string `json:"ipAddress"`
 		WebServerSecret string `json:"webServerSecret"`
+		Tag             string `json:"tag"`
 		Region          string `json:"region"`
 	}
 	if json.Unmarshal([]byte(decodedLine[jsonStart:]), &entry) != nil {
@@ -60,7 +61,10 @@ func decodeEntry(line string) (id, ip, region string, ok bool) {
 	if entry.IpAddress == "" {
 		return "", "", "", false
 	}
-	tag := protocol.GenerateServerEntryTag(entry.IpAddress, entry.WebServerSecret)
+	tag := entry.Tag
+	if tag == "" {
+		tag = protocol.GenerateServerEntryTag(entry.IpAddress, entry.WebServerSecret)
+	}
 	return protocol.TagToDiagnosticID(tag), entry.IpAddress, entry.Region, true
 }
 
