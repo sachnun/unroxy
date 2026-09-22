@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -133,7 +134,7 @@ func NewDialer(id, region string, entries []ServerEntry, logger *log.Logger) (*D
 
 	go controller.Run(ctx)
 
-	refreshInterval := 5 * time.Minute
+	refreshInterval := 10 * time.Minute
 	refreshCount := 1
 	d.startTunnelRefresh(ctx, refreshInterval, refreshCount, logger)
 
@@ -189,6 +190,14 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 
 func (d *Dialer) startTunnelRefresh(ctx context.Context, interval time.Duration, count int, logger *log.Logger) {
 	go func() {
+		initial := time.NewTimer(time.Duration(rand.Int63n(int64(interval))))
+		defer initial.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-initial.C:
+		}
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -196,6 +205,9 @@ func (d *Dialer) startTunnelRefresh(ctx context.Context, interval time.Duration,
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if d.ActiveTunnels() < d.targetPool {
+					continue
+				}
 				for i := 0; i < count; i++ {
 					d.controller.TerminateNextActiveTunnel()
 				}
