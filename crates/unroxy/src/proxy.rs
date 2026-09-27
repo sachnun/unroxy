@@ -1,0 +1,581 @@
+//! The HTTP proxy front end, ported from `internal/core/handler.go`.
+//!
+//! Three entry points, matching the Go server: `CONNECT` tunnels, absolute-URI
+//! forward proxying, and the path-based rewrite proxy.
+
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use hyper::body::Incoming;
+use hyper::{Request, Response, StatusCode, Uri};
+use hyper_util::rt::TokioIo;
+use tokio::net::{TcpListener, TcpStream};
+
+use crate::exit::ExitCache;
+use crate::pool::ProxyPool;
+use crate::upstream::{Error as UpstreamError, RotatingTransport};
+
+pub type Body = BoxBody<Bytes, std::io::Error>;
+
+pub fn empty_body() -> Body {
+    Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+pub fn full_body(bytes: impl Into<Bytes>) -> Body {
+    Full::new(bytes.into())
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("unknown proxy region")]
+    UnknownRegion,
+    #[error("unsupported scheme")]
+    UnsupportedScheme,
+    #[error("missing target host")]
+    MissingTarget,
+    #[error(transparent)]
+    Upstream(#[from] UpstreamError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// A named upstream pool, addressed by the proxy username or a path prefix.
+pub struct Region {
+    pub name: String,
+    pub username: String,
+    pub pool: Arc<ProxyPool>,
+    pub transport: Arc<RotatingTransport>,
+}
+
+pub struct Proxy {
+    default_transport: Arc<RotatingTransport>,
+    regions: RwLock<Vec<Region>>,
+    pub exits: ExitCache,
+}
+
+impl Proxy {
+    pub fn new(default_transport: Arc<RotatingTransport>, regions: Vec<Region>) -> Arc<Self> {
+        Arc::new(Self {
+            default_transport,
+            regions: RwLock::new(regions),
+            exits: ExitCache::default(),
+        })
+    }
+
+    /// Adds a region after the server has started, matching the Go provider
+    /// that registers pools as tunnels come up.
+    pub fn add_region(&self, region: Region) {
+        self.regions.write().expect("region lock").push(region);
+    }
+
+    pub fn select(&self, username: &str) -> Option<Arc<RotatingTransport>> {
+        if username.is_empty() {
+            return None;
+        }
+        self.regions
+            .read()
+            .expect("region lock")
+            .iter()
+            .find(|region| region.username.eq_ignore_ascii_case(username))
+            .map(|region| Arc::clone(&region.transport))
+    }
+
+    pub fn transport_for(&self, username: &str) -> Result<Arc<RotatingTransport>, Error> {
+        if username.is_empty() {
+            return Ok(Arc::clone(&self.default_transport));
+        }
+        self.select(username).ok_or(Error::UnknownRegion)
+    }
+
+    pub fn stats(&self) -> Vec<PoolStat> {
+        self.regions
+            .read()
+            .expect("region lock")
+            .iter()
+            .map(|region| PoolStat {
+                name: region.name.clone(),
+                proxies: region.pool.count(),
+                tunnels: region.pool.tunnel_count(),
+                usable: region.pool.usable_count(),
+            })
+            .collect()
+    }
+}
+
+pub struct PoolStat {
+    pub name: String,
+    pub proxies: usize,
+    pub tunnels: usize,
+    pub usable: usize,
+}
+
+/// The address a request was sent to, recorded so responses can report the
+/// exit that carried them.
+#[derive(Clone)]
+struct Target {
+    scheme: String,
+    host: String,
+    path: String,
+    query: String,
+}
+
+impl Target {
+    fn uri(&self) -> Result<Uri, Error> {
+        let mut uri = format!("{}://{}{}", self.scheme, self.host, self.path);
+        if !self.query.is_empty() {
+            uri.push('?');
+            uri.push_str(&self.query);
+        }
+        uri.parse().map_err(|_| Error::MissingTarget)
+    }
+}
+
+/// Splits `host:port` into its parts, defaulting the port by scheme.
+fn split_authority(authority: &str, scheme: &str) -> (String, u16) {
+    if let Some((host, port)) = authority.rsplit_once(':')
+        && let Ok(port) = port.parse::<u16>()
+        && (!host.contains(']') || host.ends_with(']'))
+    {
+        return (host.trim_matches(['[', ']']).to_string(), port);
+    }
+    let port = if scheme == "https" { 443 } else { 80 };
+    (authority.trim_matches(['[', ']']).to_string(), port)
+}
+
+pub struct Server {
+    proxy: Arc<Proxy>,
+}
+
+impl Server {
+    pub fn new(proxy: Arc<Proxy>) -> Self {
+        Self { proxy }
+    }
+
+    pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+        loop {
+            let (stream, peer) = listener.accept().await?;
+            let server = Arc::clone(&self);
+            tokio::spawn(async move {
+                if let Err(err) = server.serve_connection(stream, peer).await {
+                    tracing::debug!("connection from {peer} closed: {err}");
+                }
+            });
+        }
+    }
+
+    async fn serve_connection(
+        &self,
+        stream: TcpStream,
+        peer: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let io = TokioIo::new(stream);
+        let service = hyper::service::service_fn(move |request| {
+            let proxy = Arc::clone(&self.proxy);
+            async move { handle(proxy, request, peer).await }
+        });
+        hyper::server::conn::http1::Builder::new()
+            .preserve_header_case(true)
+            .serve_connection(io, service)
+            .with_upgrades()
+            .await?;
+        Ok(())
+    }
+}
+
+async fn handle(
+    proxy: Arc<Proxy>,
+    request: Request<Incoming>,
+    _peer: SocketAddr,
+) -> Result<Response<Body>, std::convert::Infallible> {
+    if request.method() == hyper::Method::CONNECT {
+        return Ok(handle_connect(proxy, request).await);
+    }
+
+    let response = if request.uri().host().is_some() {
+        forward(proxy, request).await
+    } else {
+        rewrite(proxy, request).await
+    };
+    Ok(response.unwrap_or_else(|err| error_response(&err)))
+}
+
+fn error_response(err: &Error) -> Response<Body> {
+    let status = match err {
+        Error::UnknownRegion | Error::Upstream(_) => StatusCode::BAD_GATEWAY,
+        Error::UnsupportedScheme | Error::MissingTarget => StatusCode::BAD_REQUEST,
+        Error::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    Response::builder()
+        .status(status)
+        .body(full_body(err.to_string()))
+        .expect("static response")
+}
+
+async fn handle_connect(proxy: Arc<Proxy>, request: Request<Incoming>) -> Response<Body> {
+    let Some(authority) = request
+        .uri()
+        .authority()
+        .map(|authority| authority.to_string())
+        .or_else(|| {
+            request
+                .headers()
+                .get(hyper::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        })
+    else {
+        return error_response(&Error::MissingTarget);
+    };
+    let (host, port) = split_authority(&authority, "https");
+
+    let username = auth_username(&request);
+    let transport = match proxy.transport_for(&username) {
+        Ok(transport) => transport,
+        Err(err) => return error_response(&err),
+    };
+
+    let candidate = match transport.pick(&host).await {
+        Ok(candidate) => candidate,
+        Err(err) => return error_response(&err.into()),
+    };
+    let upstream = match crate::socks::connect(&candidate.socks_addr(), &host, port).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::warn!("CONNECT {host}:{port}: {err}");
+            return error_response(&Error::Io(err));
+        }
+    };
+    proxy.exits.record(&host, candidate.tunnel.exit_for(&host));
+    tracing::info!(
+        "CONNECT tunnel {host}:{port} established via {}",
+        candidate.key
+    );
+
+    let on_upgrade = hyper::upgrade::on(request);
+    tokio::spawn(async move {
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
+        };
+        let mut client = TokioIo::new(upgraded);
+        let mut upstream = upstream;
+        if let Err(err) = tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+            tracing::debug!("CONNECT {host}:{port} closed: {err}");
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(empty_body())
+        .expect("static response")
+}
+
+async fn forward(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Response<Body>, Error> {
+    let uri = request.uri().clone();
+    let scheme = uri.scheme_str().unwrap_or("http").to_string();
+    if scheme != "http" && scheme != "https" {
+        return Err(Error::UnsupportedScheme);
+    }
+
+    let username = auth_username(&request);
+    let transport = proxy.transport_for(&username)?;
+
+    let target = Target {
+        scheme,
+        host: uri
+            .authority()
+            .map(|authority| authority.to_string())
+            .unwrap_or_default(),
+        path: uri.path().to_string(),
+        query: uri.query().unwrap_or_default().to_string(),
+    };
+
+    send(proxy, &transport, request, target).await
+}
+
+async fn rewrite(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Response<Body>, Error> {
+    let parsed = parse_path(request.uri());
+    let Some((pool, target)) = parsed else {
+        return Ok(index_page(
+            &proxy,
+            request.headers().get(hyper::header::HOST),
+        ));
+    };
+
+    let transport = match pool.and_then(|pool| proxy.select(&pool)) {
+        Some(transport) => transport,
+        None => Arc::clone(&proxy.default_transport),
+    };
+
+    send(proxy, &transport, request, target).await
+}
+
+async fn send(
+    proxy: Arc<Proxy>,
+    transport: &Arc<RotatingTransport>,
+    request: Request<Incoming>,
+    target: Target,
+) -> Result<Response<Body>, Error> {
+    let (parts, body) = request.into_parts();
+    let uri = target.uri()?;
+
+    let method = parts.method.clone();
+    let mut outgoing = Request::builder().method(parts.method).uri(uri);
+    {
+        let headers = outgoing.headers_mut().expect("request headers");
+        *headers = parts.headers;
+        strip_client_headers(headers);
+        strip_hop_headers(headers);
+        // The client's Host names this proxy, not the origin, so it is
+        // replaced rather than forwarded.
+        if let Ok(value) = hyper::header::HeaderValue::from_str(&target.host) {
+            headers.insert(hyper::header::HOST, value);
+        }
+    }
+    let body = body
+        .collect()
+        .await
+        .map_err(|err| Error::Io(std::io::Error::other(err.to_string())))?
+        .to_bytes();
+    let outgoing = outgoing
+        .body(wreq::Body::from(body))
+        .expect("request builds");
+
+    let method = method.clone();
+    let (candidate, response) = transport.request(outgoing).await?;
+    let status = response.status();
+    proxy
+        .exits
+        .record(&target.host, candidate.tunnel.exit_for(&target.host));
+    tracing::info!("{method} {} -> {status} ({})", target.host, candidate.key);
+
+    let exit = proxy.exits.get(&target.host);
+    let response: http::Response<wreq::Body> = response.into();
+    let (parts, body) = response.into_parts();
+    let body = body
+        .map_err(|err| std::io::Error::other(err.to_string()))
+        .boxed();
+
+    let mut out = Response::builder()
+        .status(status)
+        .body(body)
+        .expect("response builds");
+    *out.headers_mut() = parts.headers;
+    strip_hop_headers(out.headers_mut());
+    set_egress_headers(out.headers_mut(), exit.as_ref()).await;
+    Ok(out)
+}
+
+/// Reports the exit that carried the response, matching the Go server's
+/// `x-unroxy-ip` and `x-unroxy-isp` headers.
+async fn set_egress_headers(headers: &mut hyper::HeaderMap, exit: Option<&unroxy_psiphon::Exit>) {
+    let Some(exit) = exit else {
+        return;
+    };
+    if exit.ip.is_empty() {
+        return;
+    }
+    if let Ok(value) = exit.ip.parse() {
+        headers.insert("x-unroxy-ip", value);
+    }
+    let isp = crate::geo::lookup_within(&exit.ip, crate::geo::LOOKUP_TIMEOUT)
+        .await
+        .isp;
+    if !isp.is_empty()
+        && let Ok(value) = isp.parse()
+    {
+        headers.insert("x-unroxy-isp", value);
+    }
+}
+
+fn strip_client_headers(headers: &mut hyper::HeaderMap) {
+    for name in [
+        "x-forwarded-for",
+        "x-real-ip",
+        "x-originating-ip",
+        "true-client-ip",
+        "client-ip",
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "cf-connecting-ip",
+        "proxy-authorization",
+    ] {
+        headers.remove(name);
+    }
+}
+
+fn strip_hop_headers(headers: &mut hyper::HeaderMap) {
+    for name in [
+        "connection",
+        "proxy-connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ] {
+        headers.remove(name);
+    }
+}
+
+/// Reads the proxy username from either `Proxy-Authorization` or
+/// `Authorization`, matching the Go server.
+fn auth_username(request: &Request<Incoming>) -> String {
+    let header = request
+        .headers()
+        .get(hyper::header::PROXY_AUTHORIZATION)
+        .or_else(|| request.headers().get(hyper::header::AUTHORIZATION));
+    let Some(header) = header.and_then(|value| value.to_str().ok()) else {
+        return String::new();
+    };
+    let Some(encoded) = header.strip_prefix("Basic ") else {
+        return String::new();
+    };
+    decode_username(encoded.trim())
+}
+
+fn decode_username(encoded: &str) -> String {
+    use base64::Engine;
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return String::new();
+    };
+    let decoded = String::from_utf8_lossy(&decoded);
+    decoded.split(':').next().unwrap_or_default().to_string()
+}
+
+/// Parses `/{pool}/{scheme}://{domain}/{path}` into a pool name and target.
+fn parse_path(uri: &Uri) -> Option<(Option<String>, Target)> {
+    let mut rest = uri.path().trim_start_matches('/');
+    if rest.is_empty() {
+        return None;
+    }
+
+    let mut pool = None;
+    if let Some((first, tail)) = rest.split_once('/')
+        && !first.is_empty()
+        && !first.contains('.')
+        && !first.contains(':')
+    {
+        pool = Some(first.to_ascii_uppercase());
+        rest = tail;
+    }
+
+    let lower = rest.to_ascii_lowercase();
+    let (scheme, rest) = if lower.starts_with("https://") {
+        ("https", &rest["https://".len()..])
+    } else if lower.starts_with("http://") {
+        ("http", &rest["http://".len()..])
+    } else if lower.starts_with("https:") {
+        ("https", &rest["https:".len()..])
+    } else if lower.starts_with("http:") {
+        ("http", &rest["http:".len()..])
+    } else {
+        ("https", rest)
+    };
+
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (domain, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, "/"),
+    };
+    let domain = domain.rsplit('@').next().unwrap_or(domain);
+    if !is_valid_domain(domain) {
+        return None;
+    }
+
+    Some((
+        pool,
+        Target {
+            scheme: scheme.to_string(),
+            host: domain.to_string(),
+            path: path.to_string(),
+            query: uri.query().unwrap_or_default().to_string(),
+        },
+    ))
+}
+
+fn is_valid_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    if !domain.contains('.') {
+        return false;
+    }
+    domain.split('.').all(|part| {
+        !part.is_empty()
+            && part.len() <= 63
+            && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    })
+}
+
+fn index_page(proxy: &Proxy, host: Option<&hyper::header::HeaderValue>) -> Response<Body> {
+    let host = host
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("localhost:8080");
+
+    let mut out = String::new();
+    out.push_str("Usage\n─────\n");
+    out.push_str(&format!(
+        "  HTTP      curl -x http://{host} http://ipwho.is\n"
+    ));
+    out.push_str(&format!(
+        "  CONNECT   curl -x http://{host} https://ipwho.is\n"
+    ));
+    out.push_str(&format!(
+        "  Region    curl -x http://us@{host} https://ipwho.is\n"
+    ));
+    out.push_str(&format!("  Rewrite   curl http://{host}/ipwho.is\n"));
+    out.push_str(&format!(
+        "            curl http://{host}/https://ipwho.is\n"
+    ));
+
+    let stats = proxy.stats();
+    if !stats.is_empty() {
+        out.push_str("\nPools\n─────\n");
+        for (index, stat) in stats.iter().enumerate() {
+            let entry = if stat.tunnels > 0 {
+                format!("{}({}/{})", stat.name, stat.usable, stat.tunnels)
+            } else {
+                format!("{}({})", stat.name, stat.proxies)
+            };
+            if index % 5 == 0 {
+                out.push_str(&format!("  {entry:<12}"));
+            } else {
+                out.push_str(&format!("{entry:<12}"));
+            }
+            if index % 5 == 4 || index == stats.len() - 1 {
+                out.push('\n');
+            }
+        }
+        let tunnels: usize = stats.iter().map(|stat| stat.tunnels).sum();
+        let usable: usize = stats.iter().map(|stat| stat.usable).sum();
+        let proxies: usize = stats.iter().map(|stat| stat.proxies).sum();
+        if tunnels > 0 {
+            out.push_str(&format!("\nTotal: {usable}/{tunnels} usable\n"));
+        } else {
+            out.push_str(&format!("\nTotal: {proxies} proxies\n"));
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(full_body(out))
+        .expect("static response")
+}
