@@ -1,0 +1,38 @@
+[package]
+name = "unroxy"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "unroxy"
+path = "src/main.rs"
+
+[dependencies]
+unroxy-psiphon = { path = "../psiphon" }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+flate2 = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+libc = { workspace = true }
+rand = { workspace = true }
+rsa = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wreq = { workspace = true }
+wreq-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
