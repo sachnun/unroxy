@@ -14,7 +14,10 @@ RUN mkdir -p crates/psiphon/src crates/unroxy/src vendor/russh/src \
     && cargo build --release --locked
 COPY crates/ crates/
 COPY vendor/ vendor/
-RUN cargo build --release --locked -p unroxy && cp target/release/unroxy /out-unroxy
+RUN find crates vendor -name '*.rs' -exec touch {} + \
+    && cargo build --release --locked -p unroxy \
+    && cp target/release/unroxy /out-unroxy \
+    && test "$(stat -c%s /out-unroxy)" -gt 1000000
 
 FROM debian:stable-slim
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \
