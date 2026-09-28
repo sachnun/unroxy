@@ -11,12 +11,10 @@ RUN mkdir -p crates/psiphon/src crates/unroxy/src vendor/russh/src \
     && echo 'fn main() {}' > crates/unroxy/src/main.rs \
     && echo '' > crates/psiphon/src/lib.rs \
     && echo '' > vendor/russh/src/lib.rs \
-    && cargo build --release 2>/dev/null || true
+    && cargo build --release --locked
 COPY crates/ crates/
 COPY vendor/ vendor/
-RUN --mount=type=cache,target=/app/target \
-    cargo build --release -p unroxy && \
-    cp target/release/unroxy /out-unroxy
+RUN cargo build --release --locked -p unroxy && cp target/release/unroxy /out-unroxy
 
 FROM debian:stable-slim
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \
