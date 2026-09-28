@@ -3,11 +3,12 @@ mod emulation;
 mod entries;
 mod exit;
 mod geo;
+#[cfg(test)]
+mod memcheck;
 mod pool;
 mod provider;
 mod proxy;
 mod serverlist;
-mod socks;
 #[cfg(test)]
 mod testserver;
 mod upstream;
@@ -18,12 +19,7 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    tracing_subscriber::fmt().init();
 
     let mut provider = provider::Provider::new();
     let handler = Arc::clone(&provider.handler);

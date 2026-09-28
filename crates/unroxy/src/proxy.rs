@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use futures_util::TryStreamExt;
+use http_body_util::{BodyExt, BodyStream, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
@@ -41,6 +42,8 @@ pub enum Error {
     MissingTarget,
     #[error(transparent)]
     Upstream(#[from] UpstreamError),
+    #[error("psiphon: {0}")]
+    Tunnel(#[from] unroxy_psiphon::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -207,7 +210,7 @@ async fn handle(
 
 fn error_response(err: &Error) -> Response<Body> {
     let status = match err {
-        Error::UnknownRegion | Error::Upstream(_) => StatusCode::BAD_GATEWAY,
+        Error::UnknownRegion | Error::Upstream(_) | Error::Tunnel(_) => StatusCode::BAD_GATEWAY,
         Error::UnsupportedScheme | Error::MissingTarget => StatusCode::BAD_REQUEST,
         Error::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
@@ -244,11 +247,11 @@ async fn handle_connect(proxy: Arc<Proxy>, request: Request<Incoming>) -> Respon
         Ok(candidate) => candidate,
         Err(err) => return error_response(&err.into()),
     };
-    let upstream = match crate::socks::connect(&candidate.socks_addr(), &host, port).await {
+    let upstream = match candidate.tunnel.dial(&host, port).await {
         Ok(stream) => stream,
         Err(err) => {
             tracing::warn!("CONNECT {host}:{port}: {err}");
-            return error_response(&Error::Io(err));
+            return error_response(&Error::Tunnel(err));
         }
     };
     proxy.exits.record(&host, candidate.tunnel.exit_for(&host));
@@ -337,13 +340,11 @@ async fn send(
             headers.insert(hyper::header::HOST, value);
         }
     }
-    let body = body
-        .collect()
-        .await
-        .map_err(|err| Error::Io(std::io::Error::other(err.to_string())))?
-        .to_bytes();
+    let body = BodyStream::new(body)
+        .map_ok(|frame| frame.into_data().unwrap_or_default())
+        .map_err(|err| std::io::Error::other(err.to_string()));
     let outgoing = outgoing
-        .body(wreq::Body::from(body))
+        .body(wreq::Body::wrap_stream(body))
         .expect("request builds");
 
     let method = method.clone();

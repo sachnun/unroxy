@@ -1,18 +1,25 @@
 //! Egress identity lookups, ported from `internal/core/egress.go`.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use lru::LruCache;
+
+use crate::config::EXIT_CACHE_ENTRIES;
 use crate::emulation::next as next_emulation;
 
 /// The two halves are cached separately, matching the Go server: a lookup only
 /// short-circuits when both are known, and an empty value is never stored, so a
 /// failed lookup is retried rather than remembered.
-static ISP_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static COUNTRY_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ISP_CACHE: LazyLock<Mutex<LruCache<String, String>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(capacity())));
+static COUNTRY_CACHE: LazyLock<Mutex<LruCache<String, String>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(capacity())));
+
+fn capacity() -> NonZeroUsize {
+    NonZeroUsize::new(EXIT_CACHE_ENTRIES).expect("non-zero cache capacity")
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Lookup {
@@ -23,15 +30,15 @@ pub struct Lookup {
 const DEFAULT_BASE: &str = "https://ipwho.is";
 
 /// The lookup base, overridable so tests do not depend on a live service.
-static BASE: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(DEFAULT_BASE.to_string()));
+static BASE: LazyLock<Mutex<Arc<str>>> = LazyLock::new(|| Mutex::new(Arc::from(DEFAULT_BASE)));
 
-fn base() -> String {
-    BASE.lock().expect("base lock").clone()
+fn base() -> Arc<str> {
+    Arc::clone(&BASE.lock().expect("base lock"))
 }
 
 #[cfg(test)]
 fn set_base(base: &str) {
-    *BASE.lock().expect("base lock") = base.trim_end_matches('/').to_string();
+    *BASE.lock().expect("base lock") = Arc::from(base.trim_end_matches('/'));
 }
 
 /// How long a response may wait on the egress lookup. The Go server bounds it
@@ -54,16 +61,12 @@ pub async fn lookup_within(ip: &str, timeout: Duration) -> Lookup {
     };
 
     if !result.isp.is_empty() {
-        ISP_CACHE
-            .lock()
-            .expect("cache lock")
-            .insert(ip.to_string(), result.isp.clone());
+        let mut cache = ISP_CACHE.lock().expect("cache lock");
+        cache.put(ip.to_string(), result.isp.clone());
     }
     if !result.country.is_empty() {
-        COUNTRY_CACHE
-            .lock()
-            .expect("cache lock")
-            .insert(ip.to_string(), result.country.clone());
+        let mut cache = COUNTRY_CACHE.lock().expect("cache lock");
+        cache.put(ip.to_string(), result.country.clone());
     }
     result
 }

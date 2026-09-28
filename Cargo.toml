@@ -19,6 +19,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 libc = "0.2"
+lru = "0.18"
 rand = "0.9"
 rsa = "0.9"
 russh = "0.63"

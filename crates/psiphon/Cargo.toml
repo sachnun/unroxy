@@ -9,8 +9,11 @@ path = "src/lib.rs"
 
 [dependencies]
 base64 = { workspace = true }
+bytes = { workspace = true }
 hex = { workspace = true }
+lru = { workspace = true }
 rand = { workspace = true }
+rand010 = { package = "rand", version = "0.10" }
 russh = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -6,10 +6,8 @@ use std::time::Duration;
 
 use unroxy_psiphon::{Config, Tunnel};
 
-use crate::config::{
-    MAX_TUNNELS_PER_REGION, STATE_REFRESH_INTERVAL, TUNNEL_REFRESH_COUNT, TUNNEL_REFRESH_INTERVAL,
-};
-use crate::entries::{self, ServerEntry};
+use crate::config::{STATE_REFRESH_INTERVAL, TUNNEL_REFRESH_COUNT, TUNNEL_REFRESH_INTERVAL};
+use crate::entries;
 use crate::pool::{Proxy, ProxyPool};
 use crate::proxy::{Proxy as ProxyHandler, Region};
 
@@ -38,7 +36,7 @@ impl Provider {
         }
 
         let by_region = entries::parse_entries_by_region(&raw);
-        let mut regions: Vec<(String, Vec<ServerEntry>)> = by_region.into_iter().collect();
+        let mut regions: Vec<(String, Vec<String>)> = by_region.into_iter().collect();
         regions.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Every region starts at once, the way the Go provider spawns a
@@ -47,7 +45,7 @@ impl Provider {
         let mut handles = Vec::with_capacity(regions.len());
         for (region, region_entries) in regions {
             let entries_text = join_entries(&region_entries);
-            let target = region_entries.len().min(MAX_TUNNELS_PER_REGION);
+            let target = region_entries.len();
             let region_for_task = region.clone();
             handles.push((
                 region,
@@ -80,8 +78,9 @@ impl Provider {
     }
 
     fn add(&mut self, region: &str, tunnel: Arc<Tunnel>) {
+        let key: Arc<str> = Arc::from(format!("psiphon://{region}"));
         let pool = ProxyPool::new(vec![Proxy {
-            key: format!("psiphon://{region}"),
+            key: Arc::clone(&key),
             tunnel: Arc::clone(&tunnel),
             priority: 0,
         }]);
@@ -89,7 +88,7 @@ impl Provider {
 
         let mut primaries = self.primaries.proxies();
         primaries.push(Proxy {
-            key: format!("psiphon://{region}"),
+            key,
             tunnel: Arc::clone(&tunnel),
             priority: 0,
         });
@@ -112,10 +111,10 @@ impl Default for Provider {
     }
 }
 
-fn join_entries(entries: &[ServerEntry]) -> String {
+fn join_entries(entries: &[String]) -> String {
     let mut out = String::new();
     for entry in entries {
-        out.push_str(&entry.raw);
+        out.push_str(entry);
         out.push('\n');
     }
     out

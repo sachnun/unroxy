@@ -14,8 +14,9 @@ use rsa::signature::Verifier;
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    REMOTE_SERVER_LIST_LIMIT, REMOTE_SERVER_LIST_SIGNATURE_PUBLIC_KEY, REMOTE_SERVER_LIST_TIMEOUT,
-    REMOTE_SERVER_LIST_URLS, SERVER_ENTRY_CACHE,
+    REMOTE_SERVER_LIST_DECOMPRESSED_LIMIT, REMOTE_SERVER_LIST_LIMIT,
+    REMOTE_SERVER_LIST_SIGNATURE_PUBLIC_KEY, REMOTE_SERVER_LIST_TIMEOUT, REMOTE_SERVER_LIST_URLS,
+    SERVER_ENTRY_CACHE,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -101,11 +102,15 @@ async fn fetch_url(url: &str) -> Result<String, Error> {
 fn decode_package(body: &[u8]) -> Result<String, Error> {
     use std::io::Read;
 
-    let mut decoder = flate2::read::ZlibDecoder::new(body);
+    let mut decoder =
+        flate2::read::ZlibDecoder::new(body).take(REMOTE_SERVER_LIST_DECOMPRESSED_LIMIT);
     let mut json = String::new();
     decoder
         .read_to_string(&mut json)
         .map_err(|err| Error::Decode(err.to_string()))?;
+    if json.len() as u64 >= REMOTE_SERVER_LIST_DECOMPRESSED_LIMIT {
+        return Err(Error::Decode("server list too large".to_string()));
+    }
 
     let package: Package =
         serde_json::from_str(&json).map_err(|err| Error::Decode(err.to_string()))?;

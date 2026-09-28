@@ -2,7 +2,7 @@
 //! `internal/core/transport.go`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use wreq::redirect;
@@ -10,6 +10,12 @@ use wreq::redirect;
 use crate::pool::{Candidate, ProxyPool};
 
 pub const NOT_READY_WAIT: Duration = Duration::from_secs(30);
+
+/// One client per tunnel, shared by every transport. A region is dialed both by
+/// its own transport and by the primaries, and a client carries a TLS context,
+/// so keeping one per transport would duplicate the heavy part.
+static CLIENTS: LazyLock<Mutex<HashMap<Arc<str>, wreq::Client>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,23 +28,18 @@ pub enum Error {
 /// Sends requests through the proxy pool, one upstream attempt per request.
 pub struct RotatingTransport {
     pool: Arc<ProxyPool>,
-    clients: Mutex<HashMap<String, wreq::Client>>,
 }
 
 impl RotatingTransport {
     pub fn new(pool: Arc<ProxyPool>) -> Arc<Self> {
-        Arc::new(Self {
-            pool,
-            clients: Mutex::new(HashMap::new()),
-        })
+        Arc::new(Self { pool })
     }
 
     fn client(&self, candidate: &Candidate) -> Result<wreq::Client, Error> {
-        let mut clients = self.clients.lock().expect("client cache");
+        let mut clients = CLIENTS.lock().expect("client cache");
         if let Some(client) = clients.get(&candidate.key) {
             return Ok(client.clone());
         }
-
         let proxy = wreq::Proxy::all(candidate.tunnel.proxy_url())?;
         // No connection reuse. A tunnel can be retired at any moment and its
         // pooled connections die with it; a reused dead connection shows up as
@@ -51,7 +52,7 @@ impl RotatingTransport {
             .pool_max_idle_per_host(0)
             .pool_idle_timeout(None)
             .build()?;
-        clients.insert(candidate.key.clone(), client.clone());
+        clients.insert(Arc::clone(&candidate.key), client.clone());
         Ok(client)
     }
 
@@ -113,7 +114,7 @@ mod tests {
         ProxyPool::new(
             keys.iter()
                 .map(|key| Proxy {
-                    key: key.to_string(),
+                    key: (*key).into(),
                     tunnel: unroxy_psiphon::Tunnel::stub(key, 1),
                     priority: 0,
                 })

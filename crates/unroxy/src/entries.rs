@@ -6,14 +6,6 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerEntry {
-    pub id: String,
-    pub ip: String,
-    pub region: String,
-    pub raw: String,
-}
-
 fn generate_tag(ip_address: &str, web_server_secret: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(web_server_secret.as_bytes())
         .expect("hmac accepts any key length");
@@ -57,28 +49,20 @@ pub fn decode_entry(line: &str) -> Option<(String, String, String)> {
     Some((tag_to_diagnostic_id(&tag), entry.ip_address, entry.region))
 }
 
-pub fn parse_entries_by_region(raw: &str) -> HashMap<String, Vec<ServerEntry>> {
-    let mut by_region: HashMap<String, Vec<ServerEntry>> = HashMap::new();
+pub fn parse_entries_by_region(raw: &str) -> HashMap<String, Vec<String>> {
+    let mut by_region: HashMap<String, Vec<String>> = HashMap::new();
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Some((id, ip, region)) = decode_entry(line) else {
+        let Some((_, _, region)) = decode_entry(line) else {
             continue;
         };
         if region.is_empty() {
             continue;
         }
-        by_region
-            .entry(region.clone())
-            .or_default()
-            .push(ServerEntry {
-                id,
-                ip,
-                region,
-                raw: line.to_string(),
-            });
+        by_region.entry(region).or_default().push(line.to_string());
     }
     by_region
 }

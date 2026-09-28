@@ -3,22 +3,33 @@ mod ossh;
 mod session;
 mod socks;
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Semaphore;
 
 use entry::Entry;
 use session::{Session, Timeouts};
 
 pub const SERVER_ENTRY_SIGNATURE_PUBLIC_KEY: &str = "sHuUVTWaRyh5pZwy4UguSgkwmBe0EHtJJkoF5WrxmvA=";
 
+pub trait Connection: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Connection for T {}
+
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 const MANAGER_INTERVAL: Duration = Duration::from_secs(1);
 const PICK_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_RETRY: Duration = Duration::from_millis(20);
+const MAX_CONCURRENT_HANDSHAKES: usize = 8;
+static HANDSHAKES: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES)));
+const EXIT_CACHE_ENTRIES: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -76,8 +87,10 @@ struct Inner {
     target_pool: usize,
     socks_port: AtomicU16,
     sessions: RwLock<Vec<Arc<Session>>>,
-    exits: RwLock<HashMap<String, Exit>>,
-    entries: Vec<Entry>,
+    exits: RwLock<LruCache<String, Exit>>,
+    entries: Vec<Arc<Entry>>,
+    entry_not_before: Vec<AtomicU64>,
+    entry_failures: Vec<AtomicU64>,
     rotate: AtomicUsize,
     terminate_pending: AtomicUsize,
     connecting: AtomicUsize,
@@ -116,7 +129,7 @@ impl Inner {
         self.exits
             .write()
             .expect("exits lock")
-            .insert(host.to_lowercase(), exit);
+            .put(host.to_lowercase(), exit);
     }
 
     fn live(&self) -> usize {
@@ -131,7 +144,11 @@ pub struct Tunnel {
 impl Tunnel {
     pub fn start(config: &Config, server_entries: &str, data_dir: &Path) -> Result<Self, Error> {
         std::fs::create_dir_all(data_dir)?;
-        let entries = entry::parse(server_entries, &config.egress_region);
+        let entries: Vec<Arc<Entry>> = entry::parse(server_entries, &config.egress_region)
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let entry_count = entries.len();
 
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
@@ -143,8 +160,10 @@ impl Tunnel {
             target_pool: config.tunnel_pool_size.max(1) as usize,
             socks_port: AtomicU16::new(port),
             sessions: RwLock::new(Vec::new()),
-            exits: RwLock::new(HashMap::new()),
+            exits: RwLock::new(LruCache::new(exit_cache_capacity())),
             entries,
+            entry_not_before: (0..entry_count).map(|_| AtomicU64::new(0)).collect(),
+            entry_failures: (0..entry_count).map(|_| AtomicU64::new(0)).collect(),
             rotate: AtomicUsize::new(0),
             terminate_pending: AtomicUsize::new(0),
             connecting: AtomicUsize::new(0),
@@ -178,8 +197,10 @@ impl Tunnel {
                 target_pool,
                 socks_port: AtomicU16::new(0),
                 sessions: RwLock::new(Vec::new()),
-                exits: RwLock::new(HashMap::new()),
+                exits: RwLock::new(LruCache::new(exit_cache_capacity())),
                 entries: Vec::new(),
+                entry_not_before: Vec::new(),
+                entry_failures: Vec::new(),
                 rotate: AtomicUsize::new(0),
                 terminate_pending: AtomicUsize::new(0),
                 connecting: AtomicUsize::new(0),
@@ -195,6 +216,13 @@ impl Tunnel {
                 tasks: Mutex::new(Vec::new()),
             }),
         })
+    }
+
+    pub async fn dial(&self, host: &str, port: u16) -> Result<Box<dyn Connection>, Error> {
+        let session = self.inner.pick_session().await.ok_or(Error::Timeout)?;
+        let channel = session.dial(host, port).await?;
+        self.inner.record_exit(host, &session);
+        Ok(Box::new(channel))
     }
 
     pub fn region(&self) -> &str {
@@ -237,7 +265,7 @@ impl Tunnel {
             .exits
             .read()
             .expect("exits lock")
-            .get(&host.to_lowercase())
+            .peek(&host.to_lowercase())
             .cloned()
             .unwrap_or_default()
     }
@@ -262,6 +290,10 @@ impl Drop for Tunnel {
     }
 }
 
+fn exit_cache_capacity() -> NonZeroUsize {
+    NonZeroUsize::new(EXIT_CACHE_ENTRIES).expect("non-zero cache capacity")
+}
+
 async fn manage(inner: Arc<Inner>) {
     loop {
         tokio::time::sleep(MANAGER_INTERVAL).await;
@@ -276,34 +308,74 @@ async fn manage(inner: Arc<Inner>) {
         }
         inner.active.store(inner.live(), Ordering::Relaxed);
 
-        let need = inner
-            .target_pool
-            .saturating_sub(inner.live() + inner.connecting.load(Ordering::Relaxed));
-        for _ in 0..need {
-            if inner.entries.is_empty() {
+        if inner.entries.is_empty() {
+            continue;
+        }
+        loop {
+            let need = inner
+                .target_pool
+                .saturating_sub(inner.live() + inner.connecting.load(Ordering::Relaxed));
+            if need == 0 {
                 break;
             }
-            let index = inner.rotate.fetch_add(1, Ordering::Relaxed) % inner.entries.len();
-            let entry = inner.entries[index].clone();
+            let now = now_millis();
+            let Some(index) = pick_entry(&inner, now) else {
+                break;
+            };
+            let Ok(permit) = Arc::clone(&HANDSHAKES).try_acquire_owned() else {
+                tokio::time::sleep(HANDSHAKE_RETRY).await;
+                continue;
+            };
+            let entry = Arc::clone(&inner.entries[index]);
             inner.connecting.fetch_add(1, Ordering::Relaxed);
             let inner = Arc::clone(&inner);
             tokio::spawn(async move {
-                if let Ok(session) = Session::connect(
+                let connected = Session::connect(
                     &entry,
                     &inner.timeouts,
                     &inner.sponsor_id,
                     &inner.propagation_channel_id,
                     &inner.client_platform,
                 )
-                .await
-                {
-                    inner.sessions.write().expect("sessions lock").push(session);
+                .await;
+                match connected {
+                    Ok(session) => {
+                        inner.entry_failures[index].store(0, Ordering::Relaxed);
+                        inner.entry_not_before[index].store(0, Ordering::Relaxed);
+                        inner.sessions.write().expect("sessions lock").push(session);
+                    }
+                    Err(_) => {
+                        let failures =
+                            inner.entry_failures[index].fetch_add(1, Ordering::Relaxed) + 1;
+                        let backoff = (1000u64 << failures.min(6)).min(300_000);
+                        inner.entry_not_before[index]
+                            .store(now_millis() + backoff, Ordering::Relaxed);
+                    }
                 }
+                drop(permit);
                 inner.connecting.fetch_sub(1, Ordering::Relaxed);
                 inner.active.store(inner.live(), Ordering::Relaxed);
             });
         }
     }
+}
+
+fn pick_entry(inner: &Inner, now: u64) -> Option<usize> {
+    let len = inner.entries.len();
+    for _ in 0..len {
+        let index = inner.rotate.fetch_add(1, Ordering::Relaxed) % len;
+        if inner.entry_not_before[index].load(Ordering::Relaxed) <= now {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn reap(inner: &Inner) {

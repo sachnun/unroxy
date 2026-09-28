@@ -2,6 +2,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use bytes::{Buf, BytesMut};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -12,6 +13,7 @@ const MAGIC: u32 = 0x0BF5CA7E;
 const MAX_PACKET: usize = 256 * 1024;
 const MAX_LINE: usize = 4096;
 const MSG_NEWKEYS: u8 = 21;
+const SHRINK_AT: usize = 256 * 1024;
 
 struct Rc4 {
     s: [u8; 256],
@@ -81,13 +83,13 @@ pub struct OsshStream<S> {
     c2s: Rc4,
     s2c: Rc4,
     wstate: WriteState,
-    wbuf: Vec<u8>,
-    wout: Vec<u8>,
+    wbuf: BytesMut,
+    wout: BytesMut,
     rstate: ReadState,
-    rin: Vec<u8>,
-    rbuf: Vec<u8>,
+    rin: BytesMut,
+    rbuf: BytesMut,
     rline: Vec<u8>,
-    kex_prefix: Option<(Vec<u8>, usize)>,
+    kex_prefix: Option<(BytesMut, usize)>,
 }
 
 impl<S: AsyncWrite + Unpin> OsshStream<S> {
@@ -97,7 +99,7 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
         let c2s_key = derive_key(&seed, keyword.as_bytes(), b"client_to_server");
         let s2c_key = derive_key(&seed, keyword.as_bytes(), b"server_to_client");
 
-        let mut preamble = Vec::with_capacity(SEED_LENGTH + 8 + padding_len);
+        let mut preamble = BytesMut::with_capacity(SEED_LENGTH + 8 + padding_len);
         preamble.extend_from_slice(&seed);
         let encrypted_start = preamble.len();
         preamble.extend_from_slice(&MAGIC.to_be_bytes());
@@ -114,11 +116,11 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
             c2s,
             s2c: Rc4::new(&s2c_key),
             wstate: WriteState::Ident,
-            wbuf: Vec::new(),
+            wbuf: BytesMut::new(),
             wout: preamble,
             rstate: ReadState::Ident,
-            rin: Vec::new(),
-            rbuf: Vec::new(),
+            rin: BytesMut::new(),
+            rbuf: BytesMut::new(),
             rline: Vec::new(),
             kex_prefix: None,
         }
@@ -129,10 +131,9 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
             && let Some(index) = find_crlf(&self.wbuf)
         {
             let end = index + 2;
-            let mut line = self.wbuf[..end].to_vec();
+            let mut line = self.wbuf.split_to(end);
             self.c2s.apply(&mut line);
             self.wout.extend_from_slice(&line);
-            self.wbuf.drain(..end);
             self.wstate = WriteState::Kex;
         }
 
@@ -149,11 +150,10 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                 if self.wbuf.len() < total {
                     break;
                 }
-                let mut packet = self.wbuf[..total].to_vec();
+                let mut packet = self.wbuf.split_to(total);
                 let newkeys = packet[5] == MSG_NEWKEYS;
                 self.c2s.apply(&mut packet);
                 self.wout.extend_from_slice(&packet);
-                self.wbuf.drain(..total);
                 if newkeys {
                     self.wstate = WriteState::Done;
                     break;
@@ -164,7 +164,8 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
         if let WriteState::Done = self.wstate
             && !self.wbuf.is_empty()
         {
-            self.wout.append(&mut self.wbuf);
+            self.wout.extend_from_slice(&self.wbuf);
+            self.wbuf.clear();
         }
     }
 
@@ -176,7 +177,7 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                         break;
                     }
                     let mut byte = self.rin[0];
-                    self.rin.remove(0);
+                    self.rin.advance(1);
                     self.s2c.apply(std::slice::from_mut(&mut byte));
                     self.rline.push(byte);
                     if self.rline.len() > MAX_LINE {
@@ -198,7 +199,7 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                         if self.rin.len() < 5 {
                             break;
                         }
-                        let mut prefix: Vec<u8> = self.rin.drain(..5).collect();
+                        let mut prefix = self.rin.split_to(5);
                         self.s2c.apply(&mut prefix);
                         let packet_length =
                             u32::from_be_bytes(prefix[..4].try_into().unwrap()) as usize;
@@ -212,7 +213,7 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                         break;
                     }
                     let (mut packet, _) = self.kex_prefix.take().unwrap();
-                    let mut rest: Vec<u8> = self.rin.drain(..remaining).collect();
+                    let mut rest = self.rin.split_to(remaining);
                     self.s2c.apply(&mut rest);
                     packet.extend_from_slice(&rest);
                     let newkeys = packet[5] == MSG_NEWKEYS;
@@ -225,6 +226,9 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                 ReadState::Done => break,
             }
         }
+        if self.rin.is_empty() && self.rin.capacity() >= SHRINK_AT {
+            self.rin = BytesMut::new();
+        }
     }
 
     fn flush_out(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -235,10 +239,13 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                     return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                 }
                 Poll::Ready(Ok(n)) => {
-                    self.wout.drain(..n);
+                    self.wout.advance(n);
                 }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             }
+        }
+        if self.wout.capacity() >= SHRINK_AT {
+            self.wout = BytesMut::new();
         }
         Poll::Ready(Ok(()))
     }
@@ -292,15 +299,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for OsshStream<S> {
             if !self.rbuf.is_empty() {
                 let n = buf.remaining().min(self.rbuf.len());
                 buf.put_slice(&self.rbuf[..n]);
-                self.rbuf.drain(..n);
+                self.rbuf.advance(n);
+                if self.rbuf.is_empty() && self.rbuf.capacity() >= SHRINK_AT {
+                    self.rbuf = BytesMut::new();
+                }
                 return Poll::Ready(Ok(()));
             }
 
             if let ReadState::Done = self.rstate
                 && !self.rin.is_empty()
             {
-                let mut rin = std::mem::take(&mut self.rin);
-                self.rbuf.append(&mut rin);
+                let this = self.as_mut().get_mut();
+                this.rbuf.extend_from_slice(&this.rin);
+                this.rin.clear();
                 continue;
             }
 

@@ -10,14 +10,14 @@ use unroxy_psiphon::Tunnel;
 
 #[derive(Clone)]
 pub struct Proxy {
-    pub key: String,
+    pub key: Arc<str>,
     pub tunnel: Arc<Tunnel>,
     pub priority: usize,
 }
 
 #[derive(Clone)]
 pub struct Candidate {
-    pub key: String,
+    pub key: Arc<str>,
     pub tunnel: Arc<Tunnel>,
     pub priority: usize,
 }
@@ -25,10 +25,6 @@ pub struct Candidate {
 impl Candidate {
     pub fn is_ready(&self) -> bool {
         self.tunnel.is_ready()
-    }
-
-    pub fn socks_addr(&self) -> String {
-        self.tunnel.socks_addr()
     }
 }
 
@@ -117,7 +113,7 @@ mod tests {
 
     fn proxy(key: &str) -> Proxy {
         Proxy {
-            key: key.to_string(),
+            key: key.into(),
             tunnel: Tunnel::stub(key, 1),
             priority: 0,
         }

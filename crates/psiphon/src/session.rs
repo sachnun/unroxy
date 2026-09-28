@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use base64::Engine;
@@ -12,6 +13,13 @@ use crate::entry::Entry;
 use crate::ossh::OsshStream;
 
 pub type Channel = russh::ChannelStream<client::Msg>;
+
+static SSH_CONFIG: LazyLock<Arc<SshConfig>> = LazyLock::new(|| {
+    Arc::new(SshConfig {
+        client_id: russh::SshId::Standard("SSH-2.0-OpenSSH_9.6".into()),
+        ..Default::default()
+    })
+});
 
 pub struct Timeouts {
     pub connect: Duration,
@@ -72,10 +80,7 @@ impl Session {
         };
         tcp.set_nodelay(true).map_err(Error::Socket)?;
 
-        let config = Arc::new(SshConfig {
-            client_id: russh::SshId::Standard("SSH-2.0-OpenSSH_9.6".into()),
-            ..Default::default()
-        });
+        let config = Arc::clone(&SSH_CONFIG);
 
         let connected = async {
             if obfuscated {
