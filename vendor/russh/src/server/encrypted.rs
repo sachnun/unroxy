@@ -1658,10 +1658,13 @@ impl Session {
                         Ok(())
                     }
                     _ => {
-                        if let Some(ref mut enc) = self.common.encrypted {
-                            push_packet!(enc.write, {
-                                enc.write.push(msg::REQUEST_FAILURE);
-                            });
+                        let accepted = handler.global_request(&req_type, self).await?;
+                        if self.common.wants_reply {
+                            if accepted {
+                                self.request_success();
+                            } else {
+                                self.request_failure();
+                            }
                         }
                         Ok(())
                     }

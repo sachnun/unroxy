@@ -237,6 +237,17 @@ pub trait Handler: Sized {
         async { Ok(Auth::reject()) }
     }
 
+    /// Called for a global request whose name this library does not handle.
+    /// Return `true` to answer with a success, `false` for a failure.
+    #[allow(unused_variables)]
+    fn global_request(
+        &mut self,
+        name: &str,
+        session: &mut Session,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+        async { Ok(false) }
+    }
+
     /// Pre-authentication callback for public key authentication.
     /// This method is called when a client is:
     /// * probing public key authentication without a signature (yet) or
