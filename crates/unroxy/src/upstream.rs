@@ -1,6 +1,3 @@
-//! Upstream selection and request routing, ported from
-//! `internal/core/transport.go`.
-
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -11,9 +8,6 @@ use crate::pool::{Candidate, ProxyPool};
 
 pub const NOT_READY_WAIT: Duration = Duration::from_secs(30);
 
-/// One client per tunnel, shared by every transport. A region is dialed both by
-/// its own transport and by the primaries, and a client carries a TLS context,
-/// so keeping one per transport would duplicate the heavy part.
 static CLIENTS: LazyLock<Mutex<HashMap<Arc<str>, wreq::Client>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -25,7 +19,6 @@ pub enum Error {
     Request(#[from] wreq::Error),
 }
 
-/// Sends requests through the proxy pool, one upstream attempt per request.
 pub struct RotatingTransport {
     pool: Arc<ProxyPool>,
 }
@@ -41,10 +34,6 @@ impl RotatingTransport {
             return Ok(client.clone());
         }
         let proxy = wreq::Proxy::all(candidate.tunnel.proxy_url())?;
-        // No connection reuse. A tunnel can be retired at any moment and its
-        // pooled connections die with it; a reused dead connection shows up as
-        // a stalled request. The Go transport sets DisableKeepAlives for the
-        // same reason, so this is the source behaviour, not a workaround.
         let client = wreq::Client::builder()
             .emulation(crate::emulation::next())
             .proxy(proxy)
@@ -56,8 +45,6 @@ impl RotatingTransport {
         Ok(client)
     }
 
-    /// Runs one request against one upstream, returning the response and the
-    /// candidate that carried it. The caller owns both.
     pub async fn request(
         &self,
         request: http::Request<wreq::Body>,
@@ -80,25 +67,22 @@ impl RotatingTransport {
         }
     }
 
-    /// Picks a candidate, waiting for a ready tunnel the way the Go transport
-    /// does.
     pub async fn pick(&self, target_host: &str) -> Result<Candidate, Error> {
         self.ready_candidate(target_host).await
     }
 
-    /// Tunnel failures are not recorded: a tunnel that cannot dial is replaced
-    /// by the controller, and demoting it would keep the pool pinned to the
-    /// last working exit.
     async fn ready_candidate(&self, target_host: &str) -> Result<Candidate, Error> {
         let deadline = Instant::now() + NOT_READY_WAIT;
         loop {
             let candidates = self.pool.candidates(target_host);
-            let Some(first) = candidates.first() else {
+            if candidates.is_empty() {
                 return Err(Error::NoUpstream);
-            };
-            if candidates.iter().any(|candidate| candidate.is_ready()) || Instant::now() >= deadline
-            {
-                return Ok(first.clone());
+            }
+            if let Some(ready) = candidates.iter().find(|candidate| candidate.is_ready()) {
+                return Ok(ready.clone());
+            }
+            if Instant::now() >= deadline {
+                return Ok(candidates[0].clone());
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
