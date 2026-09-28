@@ -95,6 +95,7 @@ struct Inner {
     terminate_pending: AtomicUsize,
     connecting: AtomicUsize,
     active: AtomicUsize,
+    generation: AtomicU64,
     timeouts: Timeouts,
     sponsor_id: String,
     propagation_channel_id: String,
@@ -168,6 +169,7 @@ impl Tunnel {
             terminate_pending: AtomicUsize::new(0),
             connecting: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
+            generation: AtomicU64::new(0),
             timeouts: Timeouts {
                 connect: Duration::from_secs(10),
                 handshake: Duration::from_secs(20),
@@ -205,6 +207,7 @@ impl Tunnel {
                 terminate_pending: AtomicUsize::new(0),
                 connecting: AtomicUsize::new(0),
                 active: AtomicUsize::new(0),
+                generation: AtomicU64::new(0),
                 timeouts: Timeouts {
                     connect: Duration::from_secs(10),
                     handshake: Duration::from_secs(20),
@@ -239,6 +242,10 @@ impl Tunnel {
 
     pub fn is_ready(&self) -> bool {
         self.active_tunnels() > 0
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Relaxed)
     }
 
     pub fn socks_addr(&self) -> String {
@@ -300,11 +307,16 @@ async fn manage(inner: Arc<Inner>) {
         reap(&inner).await;
 
         let retire = inner.terminate_pending.swap(0, Ordering::Relaxed);
+        let mut retired = 0;
         for _ in 0..retire {
             let session = inner.sessions.write().expect("sessions lock").pop();
             if let Some(session) = session {
                 session.close().await;
+                retired += 1;
             }
+        }
+        if retired > 0 {
+            inner.generation.fetch_add(1, Ordering::Relaxed);
         }
         inner.active.store(inner.live(), Ordering::Relaxed);
 
@@ -394,5 +406,6 @@ async fn reap(inner: &Inner) {
         .write()
         .expect("sessions lock")
         .retain(|session| !dead.iter().any(|dead| Arc::ptr_eq(dead, session)));
+    inner.generation.fetch_add(1, Ordering::Relaxed);
     inner.active.store(inner.live(), Ordering::Relaxed);
 }
