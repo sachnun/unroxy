@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - crates/**
+      - vendor/**
       - Cargo.toml
       - Cargo.lock
       - Dockerfile
@@ -19,20 +20,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # The Go toolchain must match the pinned psiphon-tunnel-core release: the
-  # core's TLS fork checks Go runtime layout at init and aborts otherwise.
-  GO_TOOLCHAIN: go1.26.0
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-          cache-dependency-path: crates/psiphon/go/go.sum
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

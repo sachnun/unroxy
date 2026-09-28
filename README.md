@@ -8,9 +8,8 @@ Rotating proxy over Psiphon tunnels. One region per pool, one exit per request.
 cargo build --release
 ```
 
-The build needs Go 1.26. The Psiphon tunnel core is compiled from a pinned
-release and its TLS fork checks Go runtime layout at init, so a different
-toolchain aborts at startup. Set `UNROXY_GO_TOOLCHAIN` to override the default.
+No Go toolchain. The Psiphon tunnel core is reimplemented natively in Rust
+(`crates/psiphon`), so the build is a plain Cargo build.
 
 ## Run
 
@@ -41,4 +40,5 @@ cargo fmt --all --check
 | Path | Role |
 |---|---|
 | `crates/unroxy` | The proxy: routing, pools, providers, HTTP front end |
-| `crates/psiphon` | Rust wrapper over the Go tunnel core, plus the cgo source in `go/` |
+| `crates/psiphon` | Native Rust Psiphon client: server entries, obfuscated SSH, tunnel pool, SOCKS front end |
+| `vendor/russh` | `russh` 0.63.3 with a generic SSH global-request API added, used for the Psiphon handshake |
