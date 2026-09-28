@@ -1,13 +1,9 @@
-//! Configuration and runtime constants, ported from `internal/core/config.go`
-//! and `internal/core/probe.go`.
-
 use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 8080;
 pub const REMOTE_SERVER_LIST_DECOMPRESSED_LIMIT: u64 = 64 << 20;
 pub const EXIT_CACHE_ENTRIES: usize = 4096;
 pub const TUNNEL_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
-/// How often the cached tunnel counters are refreshed from the core.
 pub const STATE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 pub const TUNNEL_REFRESH_COUNT: usize = 1;
 pub const REMOTE_SERVER_LIST_TIMEOUT: Duration = Duration::from_secs(60);

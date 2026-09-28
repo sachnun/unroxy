@@ -1,5 +1,3 @@
-//! Server entry decoding, ported from `internal/core/servers.go`.
-
 use std::collections::HashMap;
 
 use base64::Engine;
@@ -32,7 +30,6 @@ struct RawEntry {
     region: String,
 }
 
-/// Decodes one hex-encoded server entry into its diagnostic id, IP and region.
 pub fn decode_entry(line: &str) -> Option<(String, String, String)> {
     let decoded = hex::decode(line).ok()?;
     let decoded = String::from_utf8_lossy(&decoded);

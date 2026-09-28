@@ -1,8 +1,3 @@
-//! Upstream selection, ported from `internal/core/pool.go`.
-//!
-//! The Go pool also tracks per-host failures, but this build has one upstream
-//! per region and never records one, so that path is not carried.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -45,8 +40,6 @@ impl ProxyPool {
         })
     }
 
-    /// Ordered candidates, rotated so consecutive requests leave by different
-    /// exits.
     pub fn candidates(&self, _target_host: &str) -> Vec<Candidate> {
         let inner = self.inner.read().expect("pool lock");
         if inner.proxies.is_empty() {
@@ -72,7 +65,6 @@ impl ProxyPool {
         ready
     }
 
-    /// A snapshot of the pool, used to rebuild the shared primary pool.
     pub fn proxies(&self) -> Vec<Proxy> {
         self.inner.read().expect("pool lock").proxies.clone()
     }

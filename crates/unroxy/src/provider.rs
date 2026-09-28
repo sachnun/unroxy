@@ -1,6 +1,3 @@
-//! Starting one Psiphon tunnel per region, ported from
-//! `internal/providers/psiphon/provider.go`.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,8 +12,6 @@ use crate::upstream::RotatingTransport;
 
 pub struct Provider {
     pub handler: Arc<ProxyHandler>,
-    /// Every region's tunnel is also a candidate for the unnamed default
-    /// route, mirroring the Go host that sets each dialer as a primary.
     primaries: Arc<ProxyPool>,
 }
 
@@ -39,9 +34,6 @@ impl Provider {
         let mut regions: Vec<(String, Vec<String>)> = by_region.into_iter().collect();
         regions.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Every region starts at once, the way the Go provider spawns a
-        // goroutine per region. Awaiting each start in turn would serialize
-        // the datastore opens and delay the whole pool by minutes.
         let mut handles = Vec::with_capacity(regions.len());
         for (region, region_entries) in regions {
             let entries_text = join_entries(&region_entries);
@@ -137,20 +129,12 @@ fn start_region(
         .map_err(|err| err.to_string())
 }
 
-/// Retires one tunnel per interval so the controller replaces it, which is how
-/// exits get rotated. The first retirement is jittered so regions do not all
-/// refresh together.
 fn spawn_refresh(region: String, tunnel: Arc<Tunnel>) {
     tokio::spawn(async move {
-        // The counters are cached in the wrapper, so they are refreshed from
-        // the moment the tunnel exists. A stale counter reads as "not ready",
-        // which makes a dial wait out its readiness timeout.
         let mut ticker = tokio::time::interval(STATE_REFRESH_INTERVAL);
         ticker.tick().await;
         tunnel.refresh();
 
-        // Rotation is staggered so regions do not all refresh their exits at
-        // once, but the counters keep ticking regardless.
         let mut until_rotation =
             Duration::from_secs(rand::random_range(0..TUNNEL_REFRESH_INTERVAL.as_secs()));
         loop {

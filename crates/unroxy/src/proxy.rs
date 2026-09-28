@@ -1,8 +1,3 @@
-//! The HTTP proxy front end, ported from `internal/core/handler.go`.
-//!
-//! Three entry points, matching the Go server: `CONNECT` tunnels, absolute-URI
-//! forward proxying, and the path-based rewrite proxy.
-
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
@@ -48,7 +43,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
-/// A named upstream pool, addressed by the proxy username or a path prefix.
 pub struct Region {
     pub name: String,
     pub username: String,
@@ -71,8 +65,6 @@ impl Proxy {
         })
     }
 
-    /// Adds a region after the server has started, matching the Go provider
-    /// that registers pools as tunnels come up.
     pub fn add_region(&self, region: Region) {
         self.regions.write().expect("region lock").push(region);
     }
@@ -118,8 +110,6 @@ pub struct PoolStat {
     pub usable: usize,
 }
 
-/// The address a request was sent to, recorded so responses can report the
-/// exit that carried them.
 #[derive(Clone)]
 struct Target {
     scheme: String,
@@ -139,7 +129,6 @@ impl Target {
     }
 }
 
-/// Splits `host:port` into its parts, defaulting the port by scheme.
 fn split_authority(authority: &str, scheme: &str) -> (String, u16) {
     if let Some((host, port)) = authority.rsplit_once(':')
         && let Ok(port) = port.parse::<u16>()
@@ -334,8 +323,6 @@ async fn send(
         *headers = parts.headers;
         strip_client_headers(headers);
         strip_hop_headers(headers);
-        // The client's Host names this proxy, not the origin, so it is
-        // replaced rather than forwarded.
         if let Ok(value) = hyper::header::HeaderValue::from_str(&target.host) {
             headers.insert(hyper::header::HOST, value);
         }
@@ -372,8 +359,6 @@ async fn send(
     Ok(out)
 }
 
-/// Reports the exit that carried the response, matching the Go server's
-/// `x-unroxy-ip` and `x-unroxy-isp` headers.
 async fn set_egress_headers(headers: &mut hyper::HeaderMap, exit: Option<&unroxy_psiphon::Exit>) {
     let Some(exit) = exit else {
         return;
@@ -427,8 +412,6 @@ fn strip_hop_headers(headers: &mut hyper::HeaderMap) {
     }
 }
 
-/// Reads the proxy username from either `Proxy-Authorization` or
-/// `Authorization`, matching the Go server.
 fn auth_username(request: &Request<Incoming>) -> String {
     let header = request
         .headers()
@@ -452,7 +435,6 @@ fn decode_username(encoded: &str) -> String {
     decoded.split(':').next().unwrap_or_default().to_string()
 }
 
-/// Parses `/{pool}/{scheme}://{domain}/{path}` into a pool name and target.
 fn parse_path(uri: &Uri) -> Option<(Option<String>, Target)> {
     let mut rest = uri.path().trim_start_matches('/');
     if rest.is_empty() {

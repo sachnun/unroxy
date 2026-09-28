@@ -1,9 +1,3 @@
-//! Psiphon server list loading, ported from `internal/core/serverlist.go`.
-//!
-//! The list is a zlib-compressed JSON package signed with an RSA key. The
-//! signature is verified before any entry is accepted, so a tampered list is
-//! rejected rather than parsed.
-
 use std::time::Duration;
 
 use base64::Engine;
@@ -31,8 +25,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
-/// Go marshals `[]byte` as base64, so the digest and signature arrive as
-/// strings rather than arrays.
 #[derive(serde::Deserialize)]
 struct Package {
     data: String,
@@ -41,7 +33,6 @@ struct Package {
     signature: String,
 }
 
-/// Reads the cached list, refreshing it from the network when possible.
 pub async fn load() -> String {
     match fetch().await {
         Ok(data) if !data.trim().is_empty() => {

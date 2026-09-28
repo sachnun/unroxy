@@ -1,5 +1,3 @@
-//! A tiny HTTP server for tests that would otherwise need a live service.
-
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -17,12 +15,10 @@ impl Server {
     }
 }
 
-/// Serves `body` for every request, counting hits.
 pub fn serve(body: &str) -> Server {
     serve_slow(body, Duration::ZERO)
 }
 
-/// Serves `body` after `delay`, so a client timeout can be exercised.
 pub fn serve_slow(body: &str, delay: Duration) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
     let url = format!("http://{}", listener.local_addr().unwrap());

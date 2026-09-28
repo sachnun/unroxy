@@ -1,6 +1,3 @@
-//! Exit identity per target host, replacing the Go server's global
-//! `globalHostTunnels` map plus its reflective read of the dialed connection.
-
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
