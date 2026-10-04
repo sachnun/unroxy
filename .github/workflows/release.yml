@@ -52,6 +52,27 @@ jobs:
             target/wasm32-wasip2/release/unroxy.wasm.sha256
           if-no-files-found: error
 
+  linux:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build unroxy (linux-amd64)
+        run: |
+          cargo build --release --locked -p unroxy
+          cp target/release/unroxy unroxy-x86_64-unknown-linux-gnu
+          sha256sum unroxy-x86_64-unknown-linux-gnu > unroxy-x86_64-unknown-linux-gnu.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unroxy-linux
+          path: |
+            unroxy-x86_64-unknown-linux-gnu
+            unroxy-x86_64-unknown-linux-gnu.sha256
+          if-no-files-found: error
+
   docker:
     needs: test
     runs-on: ubuntu-latest
@@ -75,15 +96,20 @@ jobs:
           cache-to: type=gha,mode=max,scope=amd64
 
   release:
-    needs: [wasm, docker]
+    needs: [wasm, linux, docker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: unroxy-wasm
+      - uses: actions/download-artifact@v4
+        with:
+          name: unroxy-linux
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             unroxy.wasm
             unroxy.wasm.sha256
+            unroxy-x86_64-unknown-linux-gnu
+            unroxy-x86_64-unknown-linux-gnu.sha256
           generate_release_notes: true
