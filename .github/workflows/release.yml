@@ -97,7 +97,7 @@ jobs:
       - name: Prune stale image versions
         uses: actions/delete-package-versions@v5
         with:
-          package-name: unroxy-rs
+          package-name: unroxy
           package-type: container
           delete-only-untagged-versions: "true"
           min-versions-to-keep: 2
