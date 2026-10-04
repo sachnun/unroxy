@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "unroxy"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "unroxy-net"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "tokio",
  "wasip2",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "unroxy-proxy"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "unroxy-psiphon"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "unroxy-wasm"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "futures-util",
