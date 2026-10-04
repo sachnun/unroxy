@@ -41,15 +41,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build unroxy (wasm)
         run: cargo build --release --locked --target wasm32-wasip2 -p unroxy-wasm
-      - name: Checksum
-        working-directory: target/wasm32-wasip2/release
-        run: sha256sum unroxy.wasm > unroxy.wasm.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: unroxy-wasm
-          path: |
-            target/wasm32-wasip2/release/unroxy.wasm
-            target/wasm32-wasip2/release/unroxy.wasm.sha256
+          path: target/wasm32-wasip2/release/unroxy.wasm
           if-no-files-found: error
 
   linux:
@@ -64,13 +59,10 @@ jobs:
         run: |
           cargo build --release --locked -p unroxy
           cp target/release/unroxy unroxy-x86_64-unknown-linux-gnu
-          sha256sum unroxy-x86_64-unknown-linux-gnu > unroxy-x86_64-unknown-linux-gnu.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: unroxy-linux
-          path: |
-            unroxy-x86_64-unknown-linux-gnu
-            unroxy-x86_64-unknown-linux-gnu.sha256
+          path: unroxy-x86_64-unknown-linux-gnu
           if-no-files-found: error
 
   docker:
@@ -123,7 +115,5 @@ jobs:
         with:
           files: |
             unroxy.wasm
-            unroxy.wasm.sha256
             unroxy-x86_64-unknown-linux-gnu
-            unroxy-x86_64-unknown-linux-gnu.sha256
           generate_release_notes: true
