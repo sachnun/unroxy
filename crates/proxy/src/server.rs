@@ -8,7 +8,7 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use unroxy_net::TcpListener;
 
 use crate::exit::ExitCache;
 use crate::pool::ProxyPool;
@@ -176,7 +176,7 @@ impl Server {
 
     async fn serve_connection(
         &self,
-        stream: tokio::net::TcpStream,
+        stream: unroxy_net::TcpStream,
         peer: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let io = TokioIo::new(stream);

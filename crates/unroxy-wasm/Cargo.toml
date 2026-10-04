@@ -1,0 +1,19 @@
+[package]
+name = "unroxy-wasm"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "unroxy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync", "time"] }
+unroxy-net = { path = "../net" }
+unroxy-psiphon = { path = "../psiphon", default-features = false }
+unroxy-proxy = { path = "../proxy" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wstd = "0.6"

@@ -1,25 +1,25 @@
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine;
-use russh::client::{self, Config as SshConfig, Handle};
-use russh::keys::PublicKeyOrCertificate;
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use bytes::Bytes;
+use makiko::{
+    AuthPasswordResult, ChannelConfig, Client, ClientConfig, ClientEvent, DisconnectError,
+    GlobalReply, GlobalReq, TunnelStream,
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::oneshot;
 
 use crate::Error;
 use crate::entry::Entry;
 use crate::ossh::OsshStream;
+use unroxy_net::TcpStream;
 
-pub type Channel = russh::ChannelStream<client::Msg>;
-
-static SSH_CONFIG: LazyLock<Arc<SshConfig>> = LazyLock::new(|| {
-    Arc::new(SshConfig {
-        client_id: russh::SshId::Standard("SSH-2.0-OpenSSH_9.6".into()),
-        ..Default::default()
-    })
-});
+pub type Channel = TunnelStream;
 
 pub struct Timeouts {
     pub connect: Duration,
@@ -27,25 +27,56 @@ pub struct Timeouts {
     pub auth: Duration,
 }
 
-struct Handler {
-    expected: Vec<u8>,
+enum Transport {
+    Plain(TcpStream),
+    Obfuscated(Box<OsshStream<TcpStream>>),
 }
 
-impl client::Handler for Handler {
-    type Error = russh::Error;
+impl AsyncRead for Transport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Transport::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Transport::Obfuscated(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
 
-    async fn check_server_key(
-        &mut self,
-        key: &PublicKeyOrCertificate,
-    ) -> Result<bool, Self::Error> {
-        Ok(key.public_key().to_bytes().unwrap_or_default() == self.expected)
+impl AsyncWrite for Transport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Transport::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Transport::Obfuscated(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Transport::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Transport::Obfuscated(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Transport::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Transport::Obfuscated(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
     }
 }
 
 pub struct Session {
     pub ip: String,
     pub protocol: &'static str,
-    handle: Mutex<Handle<Handler>>,
+    client: Client,
+    closed: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -80,22 +111,44 @@ impl Session {
         };
         tcp.set_nodelay(true).map_err(Error::Socket)?;
 
-        let config = Arc::clone(&SSH_CONFIG);
-
-        let connected = async {
-            if obfuscated {
-                let stream = OsshStream::new(tcp, &entry.ssh_obfuscated_key, 64);
-                client::connect_stream(config, stream, Handler { expected }).await
-            } else {
-                client::connect_stream(config, tcp, Handler { expected }).await
-            }
+        let transport = if obfuscated {
+            Transport::Obfuscated(Box::new(OsshStream::new(
+                tcp,
+                &entry.ssh_obfuscated_key,
+                64,
+            )))
+        } else {
+            Transport::Plain(tcp)
         };
 
-        let mut handle = match tokio::time::timeout(timeouts.handshake, connected).await {
-            Err(_) => return Err(Error::Timeout),
-            Ok(Err(err)) => return Err(Error::Core(err.to_string())),
-            Ok(Ok(handle)) => handle,
-        };
+        let (client, mut events, driver) = Client::open(transport, ClientConfig::default())
+            .map_err(|err| Error::Core(err.to_string()))?;
+
+        let closed = Arc::new(AtomicBool::new(false));
+
+        {
+            let closed = Arc::clone(&closed);
+            tokio::spawn(async move {
+                let _ = driver.await;
+                closed.store(true, Ordering::Relaxed);
+            });
+        }
+
+        {
+            let closed = Arc::clone(&closed);
+            tokio::spawn(async move {
+                while let Ok(Some(event)) = events.recv().await {
+                    if let ClientEvent::ServerPubkey(pubkey, accept) = event {
+                        if pubkey.encode().as_ref() == expected.as_slice() {
+                            accept.accept();
+                        } else {
+                            accept.reject(std::io::Error::other("unexpected host key"));
+                        }
+                    }
+                }
+                closed.store(true, Ordering::Relaxed);
+            });
+        }
 
         let session_id: String = (0..16)
             .map(|_| format!("{:02x}", rand::random::<u8>()))
@@ -108,17 +161,18 @@ impl Session {
         })
         .to_string();
 
+        let auth_deadline = timeouts.handshake.saturating_add(timeouts.auth);
         let auth = match tokio::time::timeout(
-            timeouts.auth,
-            handle.authenticate_password(entry.ssh_username.clone(), auth_payload),
+            auth_deadline,
+            client.auth_password(entry.ssh_username.clone(), auth_payload),
         )
         .await
         {
             Err(_) => return Err(Error::Timeout),
             Ok(Err(err)) => return Err(Error::Core(err.to_string())),
-            Ok(Ok(auth)) => auth,
+            Ok(Ok(result)) => result,
         };
-        if !auth.success() {
+        if !matches!(auth, AuthPasswordResult::Success) {
             return Err(Error::Auth);
         }
 
@@ -131,45 +185,55 @@ impl Session {
         })
         .to_string();
 
-        let response = match tokio::time::timeout(
-            timeouts.handshake,
-            handle.send_request("psiphon-handshake", true, handshake_payload.into_bytes()),
-        )
-        .await
-        {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        client
+            .send_request(GlobalReq {
+                request_type: "psiphon-handshake".to_string(),
+                payload: Bytes::from(handshake_payload.into_bytes()),
+                reply_tx: Some(reply_tx),
+            })
+            .map_err(|err| Error::Core(err.to_string()))?;
+
+        match tokio::time::timeout(timeouts.handshake, reply_rx).await {
             Err(_) => return Err(Error::Timeout),
-            Ok(Err(err)) => return Err(Error::Core(err.to_string())),
-            Ok(Ok(response)) => response,
-        };
-        if response.is_none() {
-            return Err(Error::Core("handshake rejected".into()));
+            Ok(Err(_)) => return Err(Error::Core("handshake aborted".into())),
+            Ok(Ok(GlobalReply::Success(_))) => {}
+            Ok(Ok(GlobalReply::Failure)) => return Err(Error::Core("handshake rejected".into())),
         }
 
         Ok(Arc::new(Session {
             ip: entry.ip.clone(),
             protocol,
-            handle: Mutex::new(handle),
+            client,
+            closed,
         }))
     }
 
     pub async fn dial(&self, host: &str, port: u16) -> Result<Channel, Error> {
-        let handle = self.handle.lock().await;
-        let channel = handle
-            .channel_open_direct_tcpip(host.to_string(), port as u32, "127.0.0.1".to_string(), 0)
+        let (tunnel, receiver) = self
+            .client
+            .connect_tunnel(
+                ChannelConfig::default(),
+                (host.to_string(), port),
+                ("127.0.0.1".to_string(), 0),
+            )
             .await
             .map_err(|err| Error::Core(err.to_string()))?;
-        drop(handle);
-        Ok(channel.into_stream())
+        Ok(TunnelStream::new(tunnel, receiver))
     }
 
     pub async fn is_closed(&self) -> bool {
-        self.handle.lock().await.is_closed()
+        self.closed.load(Ordering::Relaxed)
     }
 
     pub async fn close(&self) {
-        let handle = self.handle.lock().await;
-        let _ = handle
-            .disconnect(russh::Disconnect::ByApplication, "", "")
-            .await;
+        let _ = self.client.disconnect(DisconnectError::by_app());
+        self.closed.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.client.disconnect(DisconnectError::by_app());
     }
 }

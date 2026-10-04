@@ -2,6 +2,7 @@ mod entry;
 mod ossh;
 pub mod serverlist;
 mod session;
+#[cfg(not(target_family = "wasm"))]
 mod socks;
 
 pub use entry::{group_by_region, regions};
@@ -154,15 +155,20 @@ impl Tunnel {
             .collect();
         let entry_count = entries.len();
 
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-        listener.set_nonblocking(true)?;
-        let port = listener.local_addr()?.port();
-        let listener = tokio::net::TcpListener::from_std(listener)?;
+        #[cfg(not(target_family = "wasm"))]
+        let (socks_port, socks_listener) = {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+            listener.set_nonblocking(true)?;
+            let port = listener.local_addr()?.port();
+            (port, tokio::net::TcpListener::from_std(listener)?)
+        };
+        #[cfg(target_family = "wasm")]
+        let socks_port = 0u16;
 
         let inner = Arc::new(Inner {
             region: config.egress_region.clone(),
             target_pool: config.tunnel_pool_size.max(1) as usize,
-            socks_port: AtomicU16::new(port),
+            socks_port: AtomicU16::new(socks_port),
             sessions: RwLock::new(Vec::new()),
             exits: RwLock::new(LruCache::new(exit_cache_capacity())),
             entries,
@@ -184,13 +190,14 @@ impl Tunnel {
             tasks: Mutex::new(Vec::new()),
         });
 
-        let accept = tokio::spawn(socks::serve(listener, Arc::clone(&inner)));
         let manager = tokio::spawn(manage(Arc::clone(&inner)));
-        inner
-            .tasks
-            .lock()
-            .expect("tasks lock")
-            .extend([accept, manager]);
+        #[cfg(not(target_family = "wasm"))]
+        inner.tasks.lock().expect("tasks lock").extend([
+            tokio::spawn(socks::serve(socks_listener, Arc::clone(&inner))),
+            manager,
+        ]);
+        #[cfg(target_family = "wasm")]
+        inner.tasks.lock().expect("tasks lock").push(manager);
 
         Ok(Self { inner })
     }

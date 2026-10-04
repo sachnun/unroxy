@@ -76,33 +76,23 @@ impl Provider {
         }
 
         let by_region = unroxy_psiphon::group_by_region(raw_entries);
-        let mut handles = Vec::with_capacity(by_region.len());
+        let mut started = Vec::with_capacity(by_region.len());
         for (region, lines) in by_region {
             let entries_text = lines.join("\n");
             let target_pool = lines.len();
             let data_dir_root = self.config.data_dir_root.clone();
             let client_platform = self.config.client_platform.clone();
-            let region_for_task = region.clone();
-            handles.push((
-                region,
-                tokio::task::spawn_blocking(move || {
-                    start_region(
-                        &region_for_task,
-                        &entries_text,
-                        target_pool,
-                        &data_dir_root,
-                        &client_platform,
-                    )
-                }),
-            ));
-        }
-
-        let mut started = Vec::with_capacity(handles.len());
-        for (region, handle) in handles {
-            match handle.await {
-                Ok(Ok(tunnel)) => started.push((region, tunnel)),
-                Ok(Err(err)) => tracing::warn!("psiphon [{region}] init failed: {err}"),
-                Err(err) => tracing::warn!("psiphon [{region}] task failed: {err}"),
+            match run_region(
+                region.clone(),
+                entries_text,
+                target_pool,
+                data_dir_root,
+                client_platform,
+            )
+            .await
+            {
+                Ok(tunnel) => started.push((region, tunnel)),
+                Err(err) => tracing::warn!("psiphon [{region}] init failed: {err}"),
             }
         }
 
@@ -144,6 +134,44 @@ impl Provider {
 
         spawn_refresh(self.config.clone(), region.to_string(), tunnel);
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn run_region(
+    region: String,
+    entries_text: String,
+    target_pool: usize,
+    data_dir_root: String,
+    client_platform: String,
+) -> Result<Arc<Tunnel>, String> {
+    tokio::task::spawn_blocking(move || {
+        start_region(
+            &region,
+            &entries_text,
+            target_pool,
+            &data_dir_root,
+            &client_platform,
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[cfg(target_family = "wasm")]
+async fn run_region(
+    region: String,
+    entries_text: String,
+    target_pool: usize,
+    data_dir_root: String,
+    client_platform: String,
+) -> Result<Arc<Tunnel>, String> {
+    start_region(
+        &region,
+        &entries_text,
+        target_pool,
+        &data_dir_root,
+        &client_platform,
+    )
 }
 
 fn start_region(

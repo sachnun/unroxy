@@ -36,36 +36,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: wasix-org/cargo-wasix@v0.1.28
         with:
-          version: "0.1.34"
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
       - name: Build unroxy (wasm)
-        working-directory: wasm
-        env:
-          CARGO_HTTP_MULTIPLEXING: "false"
-        run: |
-          patch_linker() {
-            for root in "$HOME/.local/share/cargo-wasix" "$HOME/.rustup"; do
-              find "$root" -type d -name gcc-ld 2>/dev/null | while read -r dir; do
-                chmod +x "$dir"/* 2>/dev/null || true
-                ln -sf ld.lld "$dir/ld" 2>/dev/null || true
-              done
-            done
-          }
-          if ! cargo wasix build --release; then
-            echo "first build failed; patching linker shims and retrying"
-            patch_linker
-            cargo wasix build --release
-          fi
+        run: cargo build --release --locked --target wasm32-wasip2 -p unroxy-wasm
       - name: Checksum
-        working-directory: wasm/target/wasm32-wasmer-wasi/release
+        working-directory: target/wasm32-wasip2/release
         run: sha256sum unroxy.wasm > unroxy.wasm.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: unroxy-wasm
           path: |
-            wasm/target/wasm32-wasmer-wasi/release/unroxy.wasm
-            wasm/target/wasm32-wasmer-wasi/release/unroxy.wasm.sha256
+            target/wasm32-wasip2/release/unroxy.wasm
+            target/wasm32-wasip2/release/unroxy.wasm.sha256
           if-no-files-found: error
 
   docker:

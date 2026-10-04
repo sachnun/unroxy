@@ -62,6 +62,24 @@ fn derive_key(seed: &[u8], keyword: &[u8], iv: &[u8]) -> [u8; KEY_LENGTH] {
     key
 }
 
+fn normalize_packet(packet: &[u8]) -> BytesMut {
+    let packet_length = u32::from_be_bytes(packet[..4].try_into().unwrap()) as usize;
+    let padding_length = packet[4] as usize;
+    let payload_length = packet_length.saturating_sub(padding_length + 1);
+    let payload_end = (5 + payload_length).min(packet.len());
+    let payload = &packet[5..payload_end];
+    let mut new_padding = 4usize;
+    while !(payload.len() + 1 + new_padding + 4).is_multiple_of(8) {
+        new_padding += 1;
+    }
+    let mut out = BytesMut::with_capacity(5 + payload.len() + new_padding);
+    out.extend_from_slice(&((payload.len() + 1 + new_padding) as u32).to_be_bytes());
+    out.extend_from_slice(&[new_padding as u8]);
+    out.extend_from_slice(payload);
+    out.resize(5 + payload.len() + new_padding, 0);
+    out
+}
+
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\r\n")
 }
@@ -216,8 +234,9 @@ impl<S: AsyncWrite + Unpin> OsshStream<S> {
                     let mut rest = self.rin.split_to(remaining);
                     self.s2c.apply(&mut rest);
                     packet.extend_from_slice(&rest);
-                    let newkeys = packet[5] == MSG_NEWKEYS;
-                    self.rbuf.extend_from_slice(&packet);
+                    let newkeys = packet.get(5) == Some(&MSG_NEWKEYS);
+                    let normalized = normalize_packet(&packet);
+                    self.rbuf.extend_from_slice(&normalized);
                     if newkeys {
                         self.rstate = ReadState::Done;
                         break;
@@ -296,6 +315,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for OsshStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         loop {
+            self.process_read();
+
             if !self.rbuf.is_empty() {
                 let n = buf.remaining().min(self.rbuf.len());
                 buf.put_slice(&self.rbuf[..n]);
@@ -328,7 +349,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for OsshStream<S> {
                     self.rin.extend_from_slice(&tmp[..filled]);
                 }
             }
-            self.process_read();
         }
     }
 }
