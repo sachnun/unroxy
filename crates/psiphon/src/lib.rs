@@ -1,7 +1,10 @@
 mod entry;
 mod ossh;
+pub mod serverlist;
 mod session;
 mod socks;
+
+pub use entry::{group_by_region, regions};
 
 use std::num::NonZeroUsize;
 use std::path::Path;

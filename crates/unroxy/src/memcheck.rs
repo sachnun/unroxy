@@ -7,9 +7,8 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::pool::{Proxy as PoolProxy, ProxyPool};
-use crate::proxy as front;
-use crate::upstream::RotatingTransport;
+use unroxy_proxy as front;
+use unroxy_proxy::{PoolProxy, ProxyPool};
 
 static MEASURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const FULL_POOL_SESSIONS: u32 = 427;
@@ -116,7 +115,7 @@ fn proxy_with(tunnel: Arc<unroxy_psiphon::Tunnel>) -> Arc<front::Proxy> {
         tunnel,
         priority: 0,
     }]);
-    front::Proxy::new(RotatingTransport::new(pool), Vec::new())
+    front::Proxy::new(pool, None)
 }
 
 async fn spawn_proxy(proxy: Arc<front::Proxy>) -> SocketAddr {

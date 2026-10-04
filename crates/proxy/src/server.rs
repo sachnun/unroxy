@@ -1,17 +1,17 @@
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
-use futures_util::TryStreamExt;
-use http_body_util::{BodyExt, BodyStream, Full, combinators::BoxBody};
+use futures_util::future::BoxFuture;
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 use crate::exit::ExitCache;
 use crate::pool::ProxyPool;
-use crate::upstream::{Error as UpstreamError, RotatingTransport};
 
 pub type Body = BoxBody<Bytes, std::io::Error>;
 
@@ -35,41 +35,83 @@ pub enum Error {
     UnsupportedScheme,
     #[error("missing target host")]
     MissingTarget,
-    #[error(transparent)]
-    Upstream(#[from] UpstreamError),
+    #[error("forwarding unavailable")]
+    ForwardUnavailable,
     #[error("psiphon: {0}")]
     Tunnel(#[from] unroxy_psiphon::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("forward: {0}")]
+    Forward(String),
+}
+
+#[derive(Clone)]
+pub struct Target {
+    pub scheme: String,
+    pub host: String,
+    pub path: String,
+    pub query: String,
+}
+
+impl Target {
+    pub fn uri(&self) -> Result<Uri, Error> {
+        let mut uri = format!("{}://{}{}", self.scheme, self.host, self.path);
+        if !self.query.is_empty() {
+            uri.push('?');
+            uri.push_str(&self.query);
+        }
+        uri.parse().map_err(|_| Error::MissingTarget)
+    }
+}
+
+pub trait Forward: Send + Sync + 'static {
+    fn forward<'a>(
+        &'a self,
+        request: Request<Incoming>,
+        target: Target,
+        exits: &'a ExitCache,
+    ) -> BoxFuture<'a, Result<Response<Body>, Error>>;
 }
 
 pub struct Region {
     pub name: String,
     pub username: String,
     pub pool: Arc<ProxyPool>,
-    pub transport: Arc<RotatingTransport>,
+    pub forward: Option<Arc<dyn Forward>>,
+}
+
+pub struct PoolStat {
+    pub name: String,
+    pub proxies: usize,
+    pub tunnels: usize,
+    pub usable: usize,
 }
 
 pub struct Proxy {
-    default_transport: Arc<RotatingTransport>,
-    regions: RwLock<Vec<Region>>,
+    default_pool: Arc<ProxyPool>,
+    default_forward: RwLock<Option<Arc<dyn Forward>>>,
+    regions: RwLock<Vec<Arc<Region>>>,
     pub exits: ExitCache,
 }
 
 impl Proxy {
-    pub fn new(default_transport: Arc<RotatingTransport>, regions: Vec<Region>) -> Arc<Self> {
+    pub fn new(
+        default_pool: Arc<ProxyPool>,
+        default_forward: Option<Arc<dyn Forward>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            default_transport,
-            regions: RwLock::new(regions),
+            default_pool,
+            default_forward: RwLock::new(default_forward),
+            regions: RwLock::new(Vec::new()),
             exits: ExitCache::default(),
         })
     }
 
-    pub fn add_region(&self, region: Region) {
+    pub fn add_region(&self, region: Arc<Region>) {
         self.regions.write().expect("region lock").push(region);
     }
 
-    pub fn select(&self, username: &str) -> Option<Arc<RotatingTransport>> {
+    pub fn region(&self, username: &str) -> Option<Arc<Region>> {
         if username.is_empty() {
             return None;
         }
@@ -78,14 +120,22 @@ impl Proxy {
             .expect("region lock")
             .iter()
             .find(|region| region.username.eq_ignore_ascii_case(username))
-            .map(|region| Arc::clone(&region.transport))
+            .cloned()
     }
 
-    pub fn transport_for(&self, username: &str) -> Result<Arc<RotatingTransport>, Error> {
-        if username.is_empty() {
-            return Ok(Arc::clone(&self.default_transport));
+    fn forward_for(&self, username: &str) -> Option<Arc<dyn Forward>> {
+        if let Some(region) = self.region(username)
+            && let Some(forward) = &region.forward
+        {
+            return Some(Arc::clone(forward));
         }
-        self.select(username).ok_or(Error::UnknownRegion)
+        self.default_forward.read().expect("forward lock").clone()
+    }
+
+    fn pool_for(&self, username: &str) -> Arc<ProxyPool> {
+        self.region(username)
+            .map(|region| Arc::clone(&region.pool))
+            .unwrap_or_else(|| Arc::clone(&self.default_pool))
     }
 
     pub fn stats(&self) -> Vec<PoolStat> {
@@ -101,43 +151,6 @@ impl Proxy {
             })
             .collect()
     }
-}
-
-pub struct PoolStat {
-    pub name: String,
-    pub proxies: usize,
-    pub tunnels: usize,
-    pub usable: usize,
-}
-
-#[derive(Clone)]
-struct Target {
-    scheme: String,
-    host: String,
-    path: String,
-    query: String,
-}
-
-impl Target {
-    fn uri(&self) -> Result<Uri, Error> {
-        let mut uri = format!("{}://{}{}", self.scheme, self.host, self.path);
-        if !self.query.is_empty() {
-            uri.push('?');
-            uri.push_str(&self.query);
-        }
-        uri.parse().map_err(|_| Error::MissingTarget)
-    }
-}
-
-fn split_authority(authority: &str, scheme: &str) -> (String, u16) {
-    if let Some((host, port)) = authority.rsplit_once(':')
-        && let Ok(port) = port.parse::<u16>()
-        && (!host.contains(']') || host.ends_with(']'))
-    {
-        return (host.trim_matches(['[', ']']).to_string(), port);
-    }
-    let port = if scheme == "https" { 443 } else { 80 };
-    (authority.trim_matches(['[', ']']).to_string(), port)
 }
 
 pub struct Server {
@@ -163,12 +176,13 @@ impl Server {
 
     async fn serve_connection(
         &self,
-        stream: TcpStream,
+        stream: tokio::net::TcpStream,
         peer: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let io = TokioIo::new(stream);
+        let proxy = Arc::clone(&self.proxy);
         let service = hyper::service::service_fn(move |request| {
-            let proxy = Arc::clone(&self.proxy);
+            let proxy = Arc::clone(&proxy);
             async move { handle(proxy, request, peer).await }
         });
         hyper::server::conn::http1::Builder::new()
@@ -184,13 +198,13 @@ async fn handle(
     proxy: Arc<Proxy>,
     request: Request<Incoming>,
     _peer: SocketAddr,
-) -> Result<Response<Body>, std::convert::Infallible> {
+) -> Result<Response<Body>, Infallible> {
     if request.method() == hyper::Method::CONNECT {
         return Ok(handle_connect(proxy, request).await);
     }
 
     let response = if request.uri().host().is_some() {
-        forward(proxy, request).await
+        absolute(proxy, request).await
     } else {
         rewrite(proxy, request).await
     };
@@ -199,8 +213,9 @@ async fn handle(
 
 fn error_response(err: &Error) -> Response<Body> {
     let status = match err {
-        Error::UnknownRegion | Error::Upstream(_) | Error::Tunnel(_) => StatusCode::BAD_GATEWAY,
         Error::UnsupportedScheme | Error::MissingTarget => StatusCode::BAD_REQUEST,
+        Error::ForwardUnavailable => StatusCode::NOT_IMPLEMENTED,
+        Error::UnknownRegion | Error::Tunnel(_) | Error::Forward(_) => StatusCode::BAD_GATEWAY,
         Error::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     Response::builder()
@@ -227,14 +242,9 @@ async fn handle_connect(proxy: Arc<Proxy>, request: Request<Incoming>) -> Respon
     let (host, port) = split_authority(&authority, "https");
 
     let username = auth_username(&request);
-    let transport = match proxy.transport_for(&username) {
-        Ok(transport) => transport,
-        Err(err) => return error_response(&err),
-    };
-
-    let candidate = match transport.pick(&host).await {
-        Ok(candidate) => candidate,
-        Err(err) => return error_response(&err.into()),
+    let pool = proxy.pool_for(&username);
+    let Some(candidate) = pool.pick(&host).await else {
+        return error_response(&Error::UnknownRegion);
     };
     let upstream = match candidate.tunnel.dial(&host, port).await {
         Ok(stream) => stream,
@@ -267,7 +277,7 @@ async fn handle_connect(proxy: Arc<Proxy>, request: Request<Incoming>) -> Respon
         .expect("static response")
 }
 
-async fn forward(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Response<Body>, Error> {
+async fn absolute(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Response<Body>, Error> {
     let uri = request.uri().clone();
     let scheme = uri.scheme_str().unwrap_or("http").to_string();
     if scheme != "http" && scheme != "https" {
@@ -275,8 +285,9 @@ async fn forward(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Respon
     }
 
     let username = auth_username(&request);
-    let transport = proxy.transport_for(&username)?;
-
+    let forward = proxy
+        .forward_for(&username)
+        .ok_or(Error::ForwardUnavailable)?;
     let target = Target {
         scheme,
         host: uri
@@ -286,100 +297,24 @@ async fn forward(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Respon
         path: uri.path().to_string(),
         query: uri.query().unwrap_or_default().to_string(),
     };
-
-    send(proxy, &transport, request, target).await
+    forward.forward(request, target, &proxy.exits).await
 }
 
 async fn rewrite(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Response<Body>, Error> {
-    let parsed = parse_path(request.uri());
-    let Some((pool, target)) = parsed else {
+    let Some((region, target)) = parse_path(request.uri()) else {
         return Ok(index_page(
             &proxy,
             request.headers().get(hyper::header::HOST),
         ));
     };
 
-    let transport = match pool.and_then(|pool| proxy.select(&pool)) {
-        Some(transport) => transport,
-        None => Arc::clone(&proxy.default_transport),
-    };
-
-    send(proxy, &transport, request, target).await
+    let forward = proxy
+        .forward_for(region.as_deref().unwrap_or_default())
+        .ok_or(Error::ForwardUnavailable)?;
+    forward.forward(request, target, &proxy.exits).await
 }
 
-async fn send(
-    proxy: Arc<Proxy>,
-    transport: &Arc<RotatingTransport>,
-    request: Request<Incoming>,
-    target: Target,
-) -> Result<Response<Body>, Error> {
-    let (parts, body) = request.into_parts();
-    let uri = target.uri()?;
-
-    let method = parts.method.clone();
-    let mut outgoing = Request::builder().method(parts.method).uri(uri);
-    {
-        let headers = outgoing.headers_mut().expect("request headers");
-        *headers = parts.headers;
-        strip_client_headers(headers);
-        strip_hop_headers(headers);
-        if let Ok(value) = hyper::header::HeaderValue::from_str(&target.host) {
-            headers.insert(hyper::header::HOST, value);
-        }
-    }
-    let body = BodyStream::new(body)
-        .map_ok(|frame| frame.into_data().unwrap_or_default())
-        .map_err(|err| std::io::Error::other(err.to_string()));
-    let outgoing = outgoing
-        .body(wreq::Body::wrap_stream(body))
-        .expect("request builds");
-
-    let method = method.clone();
-    let (candidate, response) = transport.request(outgoing).await?;
-    let status = response.status();
-    proxy
-        .exits
-        .record(&target.host, candidate.tunnel.exit_for(&target.host));
-    tracing::info!("{method} {} -> {status} ({})", target.host, candidate.key);
-
-    let exit = proxy.exits.get(&target.host);
-    let response: http::Response<wreq::Body> = response.into();
-    let (parts, body) = response.into_parts();
-    let body = body
-        .map_err(|err| std::io::Error::other(err.to_string()))
-        .boxed();
-
-    let mut out = Response::builder()
-        .status(status)
-        .body(body)
-        .expect("response builds");
-    *out.headers_mut() = parts.headers;
-    strip_hop_headers(out.headers_mut());
-    set_egress_headers(out.headers_mut(), exit.as_ref()).await;
-    Ok(out)
-}
-
-async fn set_egress_headers(headers: &mut hyper::HeaderMap, exit: Option<&unroxy_psiphon::Exit>) {
-    let Some(exit) = exit else {
-        return;
-    };
-    if exit.ip.is_empty() {
-        return;
-    }
-    if let Ok(value) = exit.ip.parse() {
-        headers.insert("x-unroxy-ip", value);
-    }
-    let isp = crate::geo::lookup_within(&exit.ip, crate::geo::LOOKUP_TIMEOUT)
-        .await
-        .isp;
-    if !isp.is_empty()
-        && let Ok(value) = isp.parse()
-    {
-        headers.insert("x-unroxy-isp", value);
-    }
-}
-
-fn strip_client_headers(headers: &mut hyper::HeaderMap) {
+pub fn strip_client_headers(headers: &mut hyper::HeaderMap) {
     for name in [
         "x-forwarded-for",
         "x-real-ip",
@@ -396,7 +331,7 @@ fn strip_client_headers(headers: &mut hyper::HeaderMap) {
     }
 }
 
-fn strip_hop_headers(headers: &mut hyper::HeaderMap) {
+pub fn strip_hop_headers(headers: &mut hyper::HeaderMap) {
     for name in [
         "connection",
         "proxy-connection",
@@ -412,7 +347,7 @@ fn strip_hop_headers(headers: &mut hyper::HeaderMap) {
     }
 }
 
-fn auth_username(request: &Request<Incoming>) -> String {
+pub fn auth_username(request: &Request<Incoming>) -> String {
     let header = request
         .headers()
         .get(hyper::header::PROXY_AUTHORIZATION)
@@ -435,19 +370,30 @@ fn decode_username(encoded: &str) -> String {
     decoded.split(':').next().unwrap_or_default().to_string()
 }
 
+pub fn split_authority(authority: &str, scheme: &str) -> (String, u16) {
+    if let Some((host, port)) = authority.rsplit_once(':')
+        && let Ok(port) = port.parse::<u16>()
+        && (!host.contains(']') || host.ends_with(']'))
+    {
+        return (host.trim_matches(['[', ']']).to_string(), port);
+    }
+    let port = if scheme == "https" { 443 } else { 80 };
+    (authority.trim_matches(['[', ']']).to_string(), port)
+}
+
 fn parse_path(uri: &Uri) -> Option<(Option<String>, Target)> {
     let mut rest = uri.path().trim_start_matches('/');
     if rest.is_empty() {
         return None;
     }
 
-    let mut pool = None;
+    let mut region = None;
     if let Some((first, tail)) = rest.split_once('/')
         && !first.is_empty()
         && !first.contains('.')
         && !first.contains(':')
     {
-        pool = Some(first.to_ascii_uppercase());
+        region = Some(first.to_ascii_uppercase());
         rest = tail;
     }
 
@@ -479,7 +425,7 @@ fn parse_path(uri: &Uri) -> Option<(Option<String>, Target)> {
     }
 
     Some((
-        pool,
+        region,
         Target {
             scheme: scheme.to_string(),
             host: domain.to_string(),

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/psiphon", "crates/unroxy"]
+members = ["crates/proxy", "crates/psiphon", "crates/unroxy"]
 resolver = "3"
 
 [workspace.package]

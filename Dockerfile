@@ -4,11 +4,13 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY crates/proxy/Cargo.toml crates/proxy/Cargo.toml
 COPY crates/psiphon/Cargo.toml crates/psiphon/Cargo.toml
 COPY crates/unroxy/Cargo.toml crates/unroxy/Cargo.toml
 COPY vendor/russh/Cargo.toml vendor/russh/Cargo.toml
-RUN mkdir -p crates/psiphon/src crates/unroxy/src vendor/russh/src \
+RUN mkdir -p crates/proxy/src crates/psiphon/src crates/unroxy/src vendor/russh/src \
     && echo 'fn main() {}' > crates/unroxy/src/main.rs \
+    && echo '' > crates/proxy/src/lib.rs \
     && echo '' > crates/psiphon/src/lib.rs \
     && echo '' > vendor/russh/src/lib.rs \
     && cargo build --release --locked

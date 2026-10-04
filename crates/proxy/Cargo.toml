@@ -1,0 +1,19 @@
+[package]
+name = "unroxy-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+lru = "0.18"
+rand = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+unroxy-psiphon = { path = "../psiphon", default-features = false }

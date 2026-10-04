@@ -1,10 +1,13 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use unroxy_psiphon::Tunnel;
 
+const PICK_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
-pub struct Proxy {
+pub struct PoolProxy {
     pub key: Arc<str>,
     pub tunnel: Arc<Tunnel>,
     pub priority: usize,
@@ -24,7 +27,7 @@ impl Candidate {
 }
 
 struct Inner {
-    proxies: Vec<Proxy>,
+    proxies: Vec<PoolProxy>,
 }
 
 pub struct ProxyPool {
@@ -33,7 +36,7 @@ pub struct ProxyPool {
 }
 
 impl ProxyPool {
-    pub fn new(proxies: Vec<Proxy>) -> Arc<Self> {
+    pub fn new(proxies: Vec<PoolProxy>) -> Arc<Self> {
         Arc::new(Self {
             inner: RwLock::new(Inner { proxies }),
             rotation: AtomicU64::new(0),
@@ -65,11 +68,28 @@ impl ProxyPool {
         ready
     }
 
-    pub fn proxies(&self) -> Vec<Proxy> {
+    pub async fn pick(&self, target_host: &str) -> Option<Candidate> {
+        let deadline = Instant::now() + PICK_WAIT;
+        loop {
+            let candidates = self.candidates(target_host);
+            if candidates.is_empty() {
+                return None;
+            }
+            if let Some(ready) = candidates.iter().find(|candidate| candidate.is_ready()) {
+                return Some(ready.clone());
+            }
+            if Instant::now() >= deadline {
+                return Some(candidates[0].clone());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub fn proxies(&self) -> Vec<PoolProxy> {
         self.inner.read().expect("pool lock").proxies.clone()
     }
 
-    pub fn replace(&self, proxies: Vec<Proxy>) {
+    pub fn replace(&self, proxies: Vec<PoolProxy>) {
         let mut inner = self.inner.write().expect("pool lock");
         inner.proxies = proxies;
     }
@@ -103,8 +123,8 @@ impl ProxyPool {
 mod tests {
     use super::*;
 
-    fn proxy(key: &str) -> Proxy {
-        Proxy {
+    fn proxy(key: &str) -> PoolProxy {
+        PoolProxy {
             key: key.into(),
             tunnel: Tunnel::stub(key, 1),
             priority: 0,
@@ -138,7 +158,7 @@ mod tests {
     #[test]
     fn counts_report_targets_and_active_tunnels() {
         let pool = ProxyPool::new(vec![
-            Proxy {
+            PoolProxy {
                 tunnel: Tunnel::stub("a", 4),
                 ..proxy("a")
             },

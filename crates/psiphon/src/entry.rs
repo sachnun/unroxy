@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,31 +23,64 @@ pub struct Entry {
 }
 
 pub fn parse(entries: &str, region: &str) -> Vec<Entry> {
+    parse_filtered(entries, Some(region))
+}
+
+pub fn regions(entries: &str) -> Vec<String> {
+    group_by_region(entries).into_keys().collect()
+}
+
+pub fn group_by_region(entries: &str) -> BTreeMap<String, Vec<String>> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for line in entries.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(entry) = parse_line(line) else {
+            continue;
+        };
+        if entry.region.is_empty() {
+            continue;
+        }
+        grouped
+            .entry(entry.region)
+            .or_default()
+            .push(line.to_string());
+    }
+    grouped
+}
+
+fn parse_filtered(entries: &str, region: Option<&str>) -> Vec<Entry> {
     let mut parsed = Vec::new();
     for line in entries.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(decoded) = hex::decode(line) else {
+        let Some(entry) = parse_line(line) else {
             continue;
         };
-        let text = String::from_utf8_lossy(&decoded);
-        let Some(start) = text.find('{') else {
-            continue;
-        };
-        let Ok(entry) = serde_json::from_str::<Entry>(&text[start..]) else {
-            continue;
-        };
-        if entry.ip.is_empty() || entry.ssh_username.is_empty() || entry.ssh_host_key.is_empty() {
-            continue;
-        }
-        if !region.is_empty() && entry.region != region {
+        if let Some(region) = region
+            && !region.is_empty()
+            && entry.region != region
+        {
             continue;
         }
         parsed.push(entry);
     }
     parsed
+}
+
+fn parse_line(line: &str) -> Option<Entry> {
+    let decoded = hex::decode(line).ok()?;
+    let text = String::from_utf8_lossy(&decoded);
+    let start = text.find('{')?;
+    let entry: Entry = serde_json::from_str(&text[start..]).ok()?;
+    if entry.ip.is_empty() || entry.ssh_username.is_empty() || entry.ssh_host_key.is_empty() {
+        return None;
+    }
+    Some(entry)
 }
 
 #[cfg(test)]

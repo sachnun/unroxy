@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use http::Method;
 use wreq::redirect;
 
-use crate::pool::{Candidate, ProxyPool};
+use unroxy_proxy::{Candidate, ProxyPool};
 
 pub const NOT_READY_WAIT: Duration = Duration::from_secs(30);
 
@@ -131,10 +131,6 @@ impl RotatingTransport {
             .map_err(Error::Request)
     }
 
-    pub async fn pick(&self, target_host: &str) -> Result<Candidate, Error> {
-        self.ready_candidate(target_host).await
-    }
-
     async fn ready_candidate(&self, target_host: &str) -> Result<Candidate, Error> {
         let deadline = Instant::now() + NOT_READY_WAIT;
         loop {
@@ -156,12 +152,12 @@ impl RotatingTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::Proxy;
+    use unroxy_proxy::PoolProxy;
 
     fn pool_with(keys: &[&str]) -> Arc<ProxyPool> {
         ProxyPool::new(
             keys.iter()
-                .map(|key| Proxy {
+                .map(|key| PoolProxy {
                     key: (*key).into(),
                     tunnel: unroxy_psiphon::Tunnel::stub(key, 1),
                     priority: 0,

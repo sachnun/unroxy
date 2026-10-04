@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use lru::LruCache;
 use unroxy_psiphon::Exit;
 
-use crate::config::EXIT_CACHE_ENTRIES;
+const EXIT_CACHE_ENTRIES: usize = 4096;
 
 #[derive(Clone)]
 pub struct ExitCache {
