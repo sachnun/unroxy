@@ -1,0 +1,7 @@
+FROM debian:stable-slim
+RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /root/
+COPY unroxy-x86_64-unknown-linux-gnu ./unroxy
+EXPOSE 8080
+CMD ["./unroxy"]
