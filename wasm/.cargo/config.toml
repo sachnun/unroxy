@@ -1,0 +1,5 @@
+[source.crates-io]
+replace-with = "wasix"
+
+[source.wasix]
+registry = "sparse+https://cargo-registry.wasix.org/"
