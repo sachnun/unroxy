@@ -222,7 +222,7 @@ impl Session {
         Ok(TunnelStream::new(tunnel, receiver))
     }
 
-    pub async fn is_closed(&self) -> bool {
+    pub fn closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
 

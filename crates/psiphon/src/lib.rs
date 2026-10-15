@@ -98,7 +98,6 @@ struct Inner {
     rotate: AtomicUsize,
     terminate_pending: AtomicUsize,
     connecting: AtomicUsize,
-    active: AtomicUsize,
     generation: AtomicU64,
     timeouts: Timeouts,
     sponsor_id: String,
@@ -111,12 +110,17 @@ impl Inner {
     async fn pick_session(&self) -> Option<Arc<Session>> {
         let deadline = tokio::time::Instant::now() + PICK_TIMEOUT;
         loop {
-            {
-                let sessions = self.sessions.read().expect("sessions lock");
-                if !sessions.is_empty() {
-                    let index = self.rotate.fetch_add(1, Ordering::Relaxed) % sessions.len();
-                    return Some(Arc::clone(&sessions[index]));
-                }
+            let open: Vec<Arc<Session>> = self
+                .sessions
+                .read()
+                .expect("sessions lock")
+                .iter()
+                .filter(|session| !session.closed())
+                .cloned()
+                .collect();
+            if !open.is_empty() {
+                let index = self.rotate.fetch_add(1, Ordering::Relaxed) % open.len();
+                return Some(Arc::clone(&open[index]));
             }
             if tokio::time::Instant::now() >= deadline {
                 return None;
@@ -139,6 +143,15 @@ impl Inner {
 
     fn live(&self) -> usize {
         self.sessions.read().expect("sessions lock").len()
+    }
+
+    fn ready(&self) -> usize {
+        self.sessions
+            .read()
+            .expect("sessions lock")
+            .iter()
+            .filter(|session| !session.closed())
+            .count()
     }
 }
 
@@ -177,7 +190,6 @@ impl Tunnel {
             rotate: AtomicUsize::new(0),
             terminate_pending: AtomicUsize::new(0),
             connecting: AtomicUsize::new(0),
-            active: AtomicUsize::new(0),
             generation: AtomicU64::new(0),
             timeouts: Timeouts {
                 connect: Duration::from_secs(10),
@@ -216,7 +228,6 @@ impl Tunnel {
                 rotate: AtomicUsize::new(0),
                 terminate_pending: AtomicUsize::new(0),
                 connecting: AtomicUsize::new(0),
-                active: AtomicUsize::new(0),
                 generation: AtomicU64::new(0),
                 timeouts: Timeouts {
                     connect: Duration::from_secs(10),
@@ -247,7 +258,7 @@ impl Tunnel {
     }
 
     pub fn active_tunnels(&self) -> usize {
-        self.inner.active.load(Ordering::Relaxed)
+        self.inner.ready()
     }
 
     pub fn is_ready(&self) -> bool {
@@ -328,7 +339,6 @@ async fn manage(inner: Arc<Inner>) {
         if retired > 0 {
             inner.generation.fetch_add(1, Ordering::Relaxed);
         }
-        inner.active.store(inner.live(), Ordering::Relaxed);
 
         if inner.entries.is_empty() {
             continue;
@@ -376,7 +386,6 @@ async fn manage(inner: Arc<Inner>) {
                 }
                 drop(permit);
                 inner.connecting.fetch_sub(1, Ordering::Relaxed);
-                inner.active.store(inner.live(), Ordering::Relaxed);
             });
         }
     }
@@ -404,7 +413,7 @@ async fn reap(inner: &Inner) {
     let snapshot: Vec<Arc<Session>> = inner.sessions.read().expect("sessions lock").clone();
     let mut dead = Vec::new();
     for session in &snapshot {
-        if session.is_closed().await {
+        if session.closed() {
             dead.push(Arc::clone(session));
         }
     }
@@ -417,5 +426,4 @@ async fn reap(inner: &Inner) {
         .expect("sessions lock")
         .retain(|session| !dead.iter().any(|dead| Arc::ptr_eq(dead, session)));
     inner.generation.fetch_add(1, Ordering::Relaxed);
-    inner.active.store(inner.live(), Ordering::Relaxed);
 }

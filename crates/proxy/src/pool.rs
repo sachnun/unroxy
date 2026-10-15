@@ -1,10 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use unroxy_psiphon::Tunnel;
-
-const PICK_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct PoolProxy {
@@ -69,7 +67,6 @@ impl ProxyPool {
     }
 
     pub async fn pick(&self, target_host: &str) -> Option<Candidate> {
-        let deadline = Instant::now() + PICK_WAIT;
         loop {
             let candidates = self.candidates(target_host);
             if candidates.is_empty() {
@@ -78,10 +75,7 @@ impl ProxyPool {
             if let Some(ready) = candidates.iter().find(|candidate| candidate.is_ready()) {
                 return Some(ready.clone());
             }
-            if Instant::now() >= deadline {
-                return Some(candidates[0].clone());
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 
