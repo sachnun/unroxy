@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +8,6 @@ use crate::proxy::server::{Forward, Proxy, Region};
 
 #[derive(Clone)]
 pub struct ProviderConfig {
-    pub data_dir_root: String,
     pub state_refresh_interval: Duration,
     pub tunnel_refresh_interval: Duration,
     pub tunnel_refresh_count: usize,
@@ -19,7 +17,6 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            data_dir_root: "/tmp/unroxy-psiphon".to_string(),
             state_refresh_interval: Duration::from_secs(2),
             tunnel_refresh_interval: Duration::from_secs(600),
             tunnel_refresh_count: 1,
@@ -102,28 +99,18 @@ impl Provider {
         Arc::clone(&self.handler)
     }
 
-    pub async fn start(&mut self, raw_entries: &str) -> usize {
-        if raw_entries.trim().is_empty() {
-            tracing::warn!("psiphon: no server entries available, provider will be idle");
+    pub async fn start(&mut self) -> usize {
+        let by_region = crate::psiphon::group_by_region(crate::psiphon::entries());
+        if by_region.is_empty() {
+            tracing::warn!("psiphon: no accounts available, provider will be idle");
             return 0;
         }
 
-        let by_region = crate::psiphon::group_by_region(raw_entries);
         let mut started = Vec::with_capacity(by_region.len());
-        for (region, lines) in by_region {
-            let entries_text = lines.join("\n");
-            let target_pool = lines.len();
-            let data_dir_root = self.config.data_dir_root.clone();
+        for (region, entries) in by_region {
+            let target_pool = entries.len();
             let client_platform = self.config.client_platform.clone();
-            match run_region(
-                region.clone(),
-                entries_text,
-                target_pool,
-                data_dir_root,
-                client_platform,
-            )
-            .await
-            {
+            match run_region(region.clone(), target_pool, client_platform).await {
                 Ok(tunnel) => started.push((region, tunnel)),
                 Err(err) => tracing::warn!("psiphon [{region}] init failed: {err}"),
             }
@@ -171,34 +158,20 @@ impl Provider {
 
 async fn run_region(
     region: String,
-    entries_text: String,
     target_pool: usize,
-    data_dir_root: String,
     client_platform: String,
 ) -> Result<Arc<PsiphonTunnel>, String> {
-    tokio::task::spawn_blocking(move || {
-        start_region(
-            &region,
-            &entries_text,
-            target_pool,
-            &data_dir_root,
-            &client_platform,
-        )
-    })
-    .await
-    .map_err(|err| err.to_string())?
+    tokio::task::spawn_blocking(move || start_region(&region, target_pool, &client_platform))
+        .await
+        .map_err(|err| err.to_string())?
 }
 
 fn start_region(
     region: &str,
-    entries_text: &str,
     target_pool: usize,
-    data_dir_root: &str,
     client_platform: &str,
 ) -> Result<Arc<PsiphonTunnel>, String> {
-    let data_dir = format!("{data_dir_root}-{region}");
     let mut config = Config {
-        data_root_directory: data_dir.clone(),
         egress_region: region.to_string(),
         tunnel_pool_size: target_pool as u32,
         ..Config::default()
@@ -206,8 +179,7 @@ fn start_region(
     if !client_platform.is_empty() {
         config.client_platform = client_platform.to_string();
     }
-    PsiphonTunnel::start(&config, entries_text, Path::new(&data_dir))
-        .or_else(|_| PsiphonTunnel::start(&config, entries_text, Path::new(".")))
+    PsiphonTunnel::start(&config)
         .map(Arc::new)
         .map_err(|err| err.to_string())
 }

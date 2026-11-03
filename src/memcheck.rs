@@ -87,24 +87,22 @@ fn build_ssh_tunnel(
     host_key: &str,
     pool: u32,
 ) -> std::io::Result<Arc<crate::psiphon::Tunnel>> {
-    let entry = serde_json::json!({
-        "ipAddress": "127.0.0.1",
-        "sshPort": port,
-        "sshUsername": "unroxy",
-        "sshPassword": "unroxy",
-        "sshHostKey": host_key,
-        "region": "MOCK",
-    })
-    .to_string();
-    let entries = format!("{}\n", hex::encode(entry));
+    let entry = crate::psiphon::Entry {
+        ip: "127.0.0.1".to_string(),
+        region: "MOCK".to_string(),
+        ssh_port: port,
+        ossh_port: 0,
+        ssh_username: "unroxy".to_string(),
+        ssh_password: "unroxy".to_string(),
+        ssh_host_key: host_key.to_string(),
+        ssh_obfuscated_key: String::new(),
+    };
     let config = crate::psiphon::Config {
-        data_root_directory: "/tmp/unroxy-mock-ssh".to_string(),
         egress_region: "MOCK".to_string(),
         tunnel_pool_size: pool,
         ..Default::default()
     };
-    let dir = std::path::Path::new(&config.data_root_directory);
-    crate::psiphon::Tunnel::start(&config, &entries, dir)
+    crate::psiphon::Tunnel::start_with(&config, vec![entry])
         .map(Arc::new)
         .map_err(std::io::Error::other)
 }

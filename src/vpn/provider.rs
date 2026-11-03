@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -14,7 +13,6 @@ use crate::vpn::account::{Account as AccountFile, Error};
 pub struct Config {
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
-    pub suffix: String,
 }
 
 impl Default for Config {
@@ -22,13 +20,13 @@ impl Default for Config {
         Self {
             connect_timeout: Duration::from_secs(20),
             idle_timeout: Duration::from_secs(300),
-            suffix: "-VPN".to_string(),
         }
     }
 }
 
 pub struct Account {
-    name: String,
+    ip: String,
+    region: String,
     profile: Profile,
     config: Config,
     tunnel: tokio::sync::Mutex<Option<Arc<Live>>>,
@@ -45,11 +43,16 @@ struct Live {
 }
 
 impl Account {
-    pub fn new(file: AccountFile, config: Config) -> Result<Arc<Self>, Error> {
-        let profile = file.profile()?;
-        let name = format!("{}{}", file.name, config.suffix);
+    pub fn new(ip: String, file: AccountFile, config: Config) -> Result<Arc<Self>, Error> {
+        let profile = file.profile(&ip)?;
+        let region = if file.region.is_empty() {
+            "UN".to_string()
+        } else {
+            file.region.clone()
+        };
         Ok(Arc::new(Self {
-            name,
+            ip,
+            region,
             profile,
             config,
             tunnel: tokio::sync::Mutex::new(None),
@@ -61,7 +64,7 @@ impl Account {
     }
 
     pub fn name(&self) -> &str {
-        &self.name
+        &self.ip
     }
 
     fn backoff(&self) -> Duration {
@@ -94,7 +97,7 @@ impl Account {
                 });
                 self.failures.store(0, Ordering::Relaxed);
                 self.ready.store(true, Ordering::Relaxed);
-                tracing::info!("openvpn [{}]: up ({})", self.name, live.tunnel.cipher());
+                tracing::info!("openvpn [{}]: up ({})", self.ip, live.tunnel.cipher());
                 *slot = Some(Arc::clone(&live));
                 Ok(live)
             }
@@ -107,7 +110,7 @@ impl Account {
                 self.generation.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     "openvpn [{}]: {err} (retry in {}s)",
-                    self.name,
+                    self.ip,
                     backoff.as_secs()
                 );
                 Err(err.to_string())
@@ -149,7 +152,7 @@ impl Account {
         self.ready.store(false, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Relaxed);
         *slot = None;
-        tracing::debug!("openvpn [{}]: idle close", self.name);
+        tracing::debug!("openvpn [{}]: idle close", self.ip);
     }
 
     pub fn is_ready(&self) -> bool {
@@ -249,8 +252,8 @@ impl Tunnel for Account {
 
     fn exit_for(&self, _host: &str) -> Exit {
         Exit {
-            ip: String::new(),
-            region: self.name().to_string(),
+            ip: self.ip.clone(),
+            region: self.region.clone(),
             protocol: "openvpn".to_string(),
         }
     }
@@ -261,39 +264,15 @@ pub struct Accounts {
 }
 
 impl Accounts {
-    pub fn load(dir: &Path, config: Config) -> Result<Self, Error> {
+    pub fn load(config: Config) -> Self {
         let mut order = Vec::new();
-        for entry in std::fs::read_dir(dir)?.flatten() {
-            let path = entry.path();
-            let file = match path.extension().and_then(|ext| ext.to_str()) {
-                Some("ovpn") => AccountFile::from_ovpn(&path),
-                Some("toml") => AccountFile::from_toml(&path),
-                _ => continue,
-            };
-            let file = match file {
-                Ok(file) => file,
-                Err(err) => {
-                    tracing::warn!("vpn {}: {err}", path.display());
-                    continue;
-                }
-            };
-            let account = match Account::new(file, config.clone()) {
-                Ok(account) => account,
-                Err(err) => {
-                    tracing::warn!("vpn {}: {err}", path.display());
-                    continue;
-                }
-            };
-            let name = account.name().to_string();
-            if order
-                .iter()
-                .any(|existing: &Arc<Account>| existing.name() == name)
-            {
-                continue;
+        for (ip, file) in crate::vpn::account::embedded() {
+            match Account::new(ip.clone(), file, config.clone()) {
+                Ok(account) => order.push(account),
+                Err(err) => tracing::warn!("vpn {ip}: {err}"),
             }
-            order.push(account);
         }
-        Ok(Self { order })
+        Self { order }
     }
 
     pub fn len(&self) -> usize {
@@ -348,22 +327,20 @@ mod tests {
     use super::*;
     use crate::vpn::account::Remote;
 
-    fn account(name: &str) -> Arc<Account> {
+    fn account(ip: &str, region: &str) -> Arc<Account> {
         let file = AccountFile {
-            name: name.to_string(),
-            protocol: Some("udp".to_string()),
+            region: region.to_string(),
             cipher: Some("AES-256-GCM".to_string()),
             auth: Some("SHA1".to_string()),
             ca: "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----".to_string(),
             cert: "-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----".to_string(),
             key: "-----BEGIN PRIVATE KEY-----\nCCC\n-----END PRIVATE KEY-----".to_string(),
             remotes: vec![Remote {
-                host: "198.51.100.1".to_string(),
                 port: Some(1194),
                 protocol: Some("udp".to_string()),
             }],
         };
-        Account::new(file, Config::default()).expect("account")
+        Account::new(ip.to_string(), file, Config::default()).expect("account")
     }
 
     fn idle(connections: usize, since: Option<Instant>) -> (AtomicUsize, RwLock<Option<Instant>>) {
@@ -420,9 +397,10 @@ mod tests {
     }
 
     #[test]
-    fn name_gets_region_suffix() {
-        let account = account("SG");
-        assert_eq!(account.name(), "SG-VPN");
+    fn account_is_keyed_by_ip() {
+        let account = account("103.6.52.13", "ID");
+        assert_eq!(account.name(), "103.6.52.13");
+        assert_eq!(account.region, "ID");
         assert!(!account.is_ready());
         assert_eq!(account.target_pool(), 1);
         assert_eq!(account.active_tunnels(), 0);
@@ -432,30 +410,21 @@ mod tests {
 
     #[test]
     fn exit_uses_region_and_protocol() {
-        let account = account("ID");
+        let account = account("103.6.52.13", "ID");
         let exit = Tunnel::exit_for(account.as_ref(), "example.com");
-        assert_eq!(exit.region, "ID-VPN");
+        assert_eq!(exit.ip, "103.6.52.13");
+        assert_eq!(exit.region, "ID");
         assert_eq!(exit.protocol, "openvpn");
-        assert!(exit.ip.is_empty());
     }
 
     #[test]
-    fn loads_profiles_from_directory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir = dir.path();
-        std::fs::write(
-            dir.join("[SG] Server 1.ovpn"),
-            "proto udp\nremote 198.51.100.1 1194\ncipher AES-128-CBC\nauth SHA1\n\
-             <ca>\n-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n</ca>\n\
-             <cert>\n-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n</cert>\n\
-             <key>\n-----BEGIN PRIVATE KEY-----\nCCC\n-----END PRIVATE KEY-----\n</key>\n",
-        )
-        .expect("write");
-        std::fs::write(dir.join("[SG] Server 2.ovpn"), "remote 198.51.100.2\n")
-            .expect("write duplicate");
-        std::fs::write(dir.join("notes.txt"), "ignored").expect("write");
-        let accounts = Accounts::load(dir, Config::default()).expect("accounts");
-        assert_eq!(accounts.len(), 1, "duplicate region is skipped");
-        assert_eq!(accounts.iter().next().expect("account").name(), "SG-VPN");
+    fn loads_embedded_accounts() {
+        let accounts = Accounts::load(Config::default());
+        assert!(accounts.len() > 100, "expected embedded accounts");
+        let mut ips = std::collections::HashSet::new();
+        for account in accounts.iter() {
+            assert!(ips.insert(account.name().to_string()));
+            assert!(!account.region.is_empty());
+        }
     }
 }

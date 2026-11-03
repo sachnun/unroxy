@@ -16,22 +16,11 @@ pub struct Vpn {
 }
 
 impl Vpn {
-    pub fn load(dir: &str, config: Config) -> Option<Arc<Self>> {
-        let path = std::path::Path::new(dir);
-        if !path.is_dir() {
-            tracing::debug!("vpn: {dir} not found, skipping");
-            return None;
-        }
-        match Accounts::load(path, config) {
-            Ok(accounts) => Some(Arc::new(Self {
-                accounts: Arc::new(accounts),
-                factory: Arc::new(DialFactory),
-            })),
-            Err(err) => {
-                tracing::warn!("vpn: {err}");
-                None
-            }
-        }
+    pub fn load(config: Config) -> Arc<Self> {
+        Arc::new(Self {
+            accounts: Arc::new(Accounts::load(config)),
+            factory: Arc::new(DialFactory),
+        })
     }
 
     pub fn attach(&self, proxy: &Proxy) {

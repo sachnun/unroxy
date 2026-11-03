@@ -1,13 +1,11 @@
 mod entry;
 mod ossh;
-pub mod serverlist;
 mod session;
 mod socks;
 
-pub use entry::group_by_region;
+pub use entry::{Entry, all as entries, group_by_region};
 
 use std::num::NonZeroUsize;
-use std::path::Path;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
@@ -17,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Semaphore;
 
-use entry::Entry;
 use session::{Session, Timeouts};
 
 pub trait Connection: AsyncRead + AsyncWrite + Send + Unpin {}
@@ -48,7 +45,6 @@ pub enum Error {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub data_root_directory: String,
     pub egress_region: String,
     pub tunnel_pool_size: u32,
     pub establish_timeout_seconds: u32,
@@ -60,7 +56,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            data_root_directory: String::new(),
             egress_region: String::new(),
             tunnel_pool_size: 1,
             establish_timeout_seconds: 300,
@@ -152,12 +147,12 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    pub fn start(config: &Config, server_entries: &str, data_dir: &Path) -> Result<Self, Error> {
-        std::fs::create_dir_all(data_dir)?;
-        let entries: Vec<Arc<Entry>> = entry::parse(server_entries, &config.egress_region)
-            .into_iter()
-            .map(Arc::new)
-            .collect();
+    pub fn start(config: &Config) -> Result<Self, Error> {
+        Self::start_with(config, entry::parse(entry::all(), &config.egress_region))
+    }
+
+    pub fn start_with(config: &Config, entries: Vec<Entry>) -> Result<Self, Error> {
+        let entries: Vec<Arc<Entry>> = entries.into_iter().map(Arc::new).collect();
         let entry_count = entries.len();
 
         let (socks_port, socks_listener) = {

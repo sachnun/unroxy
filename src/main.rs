@@ -8,7 +8,6 @@ mod memcheck;
 mod openvpn;
 mod proxy;
 mod psiphon;
-mod serverlist;
 #[cfg(test)]
 mod testserver;
 mod upstream;

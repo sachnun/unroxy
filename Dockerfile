@@ -8,6 +8,7 @@ RUN mkdir -p src \
     && echo 'fn main() {}' > src/main.rs \
     && cargo build --release --locked
 COPY src/ src/
+COPY accounts/ accounts/
 RUN find src -name '*.rs' -exec touch {} + \
     && cargo build --release --locked \
     && cp target/release/unroxy /out-unroxy \
@@ -17,7 +18,6 @@ FROM debian:stable-slim
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /root/
-RUN mkdir -p /root/vpn
 COPY --from=builder /out-unroxy ./unroxy
 EXPOSE 8080
 CMD ["./unroxy"]
