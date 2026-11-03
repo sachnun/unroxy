@@ -29,24 +29,6 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-  wasm:
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
-      - name: Build unroxy (wasm)
-        run: cargo build --release --locked --target wasm32-wasip2 -p unroxy-wasm
-      - uses: actions/upload-artifact@v4
-        with:
-          name: unroxy-wasm
-          path: target/wasm32-wasip2/release/unroxy.wasm
-          if-no-files-found: error
-
   linux:
     needs: test
     runs-on: ubuntu-latest
@@ -57,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build unroxy (linux-amd64)
         run: |
-          cargo build --release --locked -p unroxy
+          cargo build --release --locked
           cp target/release/unroxy unroxy-x86_64-unknown-linux-gnu
       - uses: actions/upload-artifact@v4
         with:
@@ -103,18 +85,14 @@ jobs:
           min-versions-to-keep: 2
 
   release:
-    needs: [wasm, linux, docker]
+    needs: [linux, docker]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: unroxy-wasm
       - uses: actions/download-artifact@v4
         with:
           name: unroxy-linux
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            unroxy.wasm
             unroxy-x86_64-unknown-linux-gnu
           generate_release_notes: true

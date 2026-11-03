@@ -1,33 +1,45 @@
-[workspace]
-members = ["crates/net", "crates/proxy", "crates/psiphon", "crates/unroxy", "crates/unroxy-wasm"]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "unroxy"
 version = "0.0.3"
 edition = "2024"
 
-[workspace.dependencies]
+[[bin]]
+name = "unroxy"
+path = "src/main.rs"
+
+[dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
 anyhow = "1"
 base64 = "0.22"
+btls = "0.5"
 bytes = "1"
+cbc = "0.1"
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
 flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
+hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 libc = "0.2"
 lru = "0.18"
+makiko = "0.2"
+md-5 = "0.10"
 rand = "0.9"
 rsa = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha1 = "0.11"
+sha1 = "0.10"
 sha2 = { version = "0.10", features = ["oid"] }
+smoltcp = { version = "0.14", default-features = false, features = ["medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "alloc"] }
 thiserror = "2"
-tokio = { version = "1" }
-tower = "0.5"
+tokio = { version = "1", features = ["full"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 wreq = { version = "0.16", default-features = false, features = ["tokio-rt", "webpki-roots", "gzip", "brotli", "stream", "socks"] }
 wreq-util = "0.2"
 
