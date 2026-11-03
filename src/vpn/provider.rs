@@ -441,9 +441,8 @@ mod tests {
 
     #[test]
     fn loads_profiles_from_directory() {
-        let dir = std::env::temp_dir().join(format!("unroxy-vpn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = dir.path();
         std::fs::write(
             dir.join("[SG] Server 1.ovpn"),
             "proto udp\nremote 198.51.100.1 1194\ncipher AES-128-CBC\nauth SHA1\n\
@@ -455,9 +454,8 @@ mod tests {
         std::fs::write(dir.join("[SG] Server 2.ovpn"), "remote 198.51.100.2\n")
             .expect("write duplicate");
         std::fs::write(dir.join("notes.txt"), "ignored").expect("write");
-        let accounts = Accounts::load(&dir, Config::default()).expect("accounts");
+        let accounts = Accounts::load(dir, Config::default()).expect("accounts");
         assert_eq!(accounts.len(), 1, "duplicate region is skipped");
         assert_eq!(accounts.iter().next().expect("account").name(), "SG-VPN");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

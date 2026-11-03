@@ -17,12 +17,9 @@ pub struct Vpn {
 
 impl Vpn {
     pub fn load(dir: &str, config: Config) -> Option<Arc<Self>> {
-        if dir.trim().is_empty() {
-            return None;
-        }
         let path = std::path::Path::new(dir);
         if !path.is_dir() {
-            tracing::warn!("vpn: {dir} is not a directory");
+            tracing::debug!("vpn: {dir} not found, skipping");
             return None;
         }
         match Accounts::load(path, config) {

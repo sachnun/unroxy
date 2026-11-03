@@ -6,6 +6,7 @@ use btls::ssl::{
     SslStreamBuilder, SslVerifyMode,
 };
 use btls::x509::X509;
+use btls::x509::store::X509StoreBuilder;
 
 use crate::openvpn::config::Credentials;
 use crate::openvpn::error::Error;
@@ -13,20 +14,15 @@ use crate::openvpn::error::Error;
 pub struct CredentialStore {
     cert: Vec<u8>,
     key: Vec<u8>,
-    ca_path: String,
+    ca: Vec<u8>,
 }
 
 impl CredentialStore {
     pub fn new(credentials: &Credentials) -> Self {
-        let ca_path = std::env::temp_dir()
-            .join(format!("unroxy-ca-{}.pem", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
-        let _ = std::fs::write(&ca_path, credentials.ca.as_bytes());
         Self {
             cert: credentials.cert.as_bytes().to_vec(),
             key: credentials.key.as_bytes().to_vec(),
-            ca_path,
+            ca: credentials.ca.as_bytes().to_vec(),
         }
     }
 
@@ -34,9 +30,15 @@ impl CredentialStore {
         let mut builder = SslConnector::builder(SslMethod::tls())
             .map_err(|err| Error::Tls(format!("{err:?}")))?;
         builder.set_verify(SslVerifyMode::PEER);
-        builder
-            .set_ca_file(&self.ca_path)
-            .map_err(|err| Error::Tls(format!("{err:?}")))?;
+        let mut store = X509StoreBuilder::new().map_err(|err| Error::Tls(format!("{err:?}")))?;
+        let anchors =
+            X509::stack_from_pem(&self.ca).map_err(|err| Error::Tls(format!("{err:?}")))?;
+        for anchor in &anchors {
+            store
+                .add_cert(anchor)
+                .map_err(|err| Error::Tls(format!("{err:?}")))?;
+        }
+        builder.set_cert_store(store.build());
         let cert = X509::from_pem(&self.cert).map_err(|err| Error::Tls(format!("{err:?}")))?;
         let key = btls::pkey::PKey::private_key_from_pem(&self.key)
             .map_err(|err| Error::Tls(format!("{err:?}")))?;

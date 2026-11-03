@@ -17,6 +17,7 @@ FROM debian:stable-slim
 RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /root/
+RUN mkdir -p /root/vpn
 COPY --from=builder /out-unroxy ./unroxy
 EXPOSE 8080
 CMD ["./unroxy"]
