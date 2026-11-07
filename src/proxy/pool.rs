@@ -74,6 +74,7 @@ impl Candidate {
 
 struct Inner {
     proxies: Vec<PoolProxy>,
+    children: Vec<Arc<ProxyPool>>,
 }
 
 pub struct ProxyPool {
@@ -84,7 +85,10 @@ pub struct ProxyPool {
 impl ProxyPool {
     pub fn new(proxies: Vec<PoolProxy>) -> Arc<Self> {
         Arc::new(Self {
-            inner: RwLock::new(Inner { proxies }),
+            inner: RwLock::new(Inner {
+                proxies,
+                children: Vec::new(),
+            }),
             rotation: AtomicU64::new(0),
         })
     }
@@ -98,18 +102,15 @@ impl ProxyPool {
     }
 
     fn filtered(&self, protocol: Option<Protocol>, _target_host: &str) -> Vec<Candidate> {
-        let inner = self.inner.read().expect("pool lock");
-        let mut ready: Vec<Candidate> = inner
-            .proxies
-            .iter()
-            .filter(|proxy| protocol.is_none_or(|wanted| proxy.protocol == wanted))
-            .map(|proxy| Candidate {
-                key: proxy.key.clone(),
-                tunnel: Arc::clone(&proxy.tunnel),
-                priority: proxy.priority,
-                protocol: proxy.protocol,
-            })
-            .collect();
+        let mut ready = self.local(protocol);
+        let children = self.inner.read().expect("pool lock").children.clone();
+        for child in children {
+            for candidate in child.filtered(protocol, _target_host) {
+                if !ready.iter().any(|known| known.key == candidate.key) {
+                    ready.push(candidate);
+                }
+            }
+        }
 
         ready.sort_by_key(|candidate| candidate.priority);
 
@@ -119,6 +120,33 @@ impl ProxyPool {
             ready.rotate_left(offset);
         }
         ready
+    }
+
+    fn local(&self, protocol: Option<Protocol>) -> Vec<Candidate> {
+        self.inner
+            .read()
+            .expect("pool lock")
+            .proxies
+            .iter()
+            .filter(|proxy| protocol.is_none_or(|wanted| proxy.protocol == wanted))
+            .map(|proxy| Candidate {
+                key: proxy.key.clone(),
+                tunnel: Arc::clone(&proxy.tunnel),
+                priority: proxy.priority,
+                protocol: proxy.protocol,
+            })
+            .collect()
+    }
+
+    pub fn add_child(&self, child: Arc<ProxyPool>) {
+        let mut inner = self.inner.write().expect("pool lock");
+        if !inner
+            .children
+            .iter()
+            .any(|known| Arc::ptr_eq(known, &child))
+        {
+            inner.children.push(child);
+        }
     }
 
     pub async fn pick(&self, target_host: &str) -> Option<Candidate> {
@@ -144,28 +172,50 @@ impl ProxyPool {
 
     pub fn push(&self, proxy: PoolProxy) {
         let mut inner = self.inner.write().expect("pool lock");
-        inner.proxies.push(proxy);
+        if !inner
+            .proxies
+            .iter()
+            .any(|existing| existing.key == proxy.key)
+        {
+            inner.proxies.push(proxy);
+        }
+    }
+
+    pub fn remove(&self, key: &str) {
+        let mut inner = self.inner.write().expect("pool lock");
+        inner.proxies.retain(|proxy| &*proxy.key != key);
+    }
+
+    pub fn contains(&self, key: &str) -> bool {
+        self.all().iter().any(|proxy| &*proxy.key == key)
     }
 
     pub fn count(&self) -> usize {
-        self.inner.read().expect("pool lock").proxies.len()
+        self.all().len()
+    }
+
+    fn all(&self) -> Vec<PoolProxy> {
+        let mut proxies = self.proxies();
+        let children = self.inner.read().expect("pool lock").children.clone();
+        for child in children {
+            for proxy in child.all() {
+                if !proxies.iter().any(|known| known.key == proxy.key) {
+                    proxies.push(proxy);
+                }
+            }
+        }
+        proxies
     }
 
     pub fn tunnel_count(&self) -> usize {
-        self.inner
-            .read()
-            .expect("pool lock")
-            .proxies
+        self.all()
             .iter()
             .map(|proxy| proxy.tunnel.target_pool())
             .sum()
     }
 
     pub fn usable_count(&self) -> usize {
-        self.inner
-            .read()
-            .expect("pool lock")
-            .proxies
+        self.all()
             .iter()
             .map(|proxy| proxy.tunnel.active_tunnels())
             .sum()
@@ -307,6 +357,36 @@ mod tests {
             seen.insert(pool.candidates("example.com")[0].protocol);
         }
         assert_eq!(seen.len(), 2, "rotation should reach both protocols");
+    }
+
+    #[test]
+    fn push_is_idempotent() {
+        let pool = ProxyPool::new(Vec::new());
+        pool.push(proxy("a"));
+        pool.push(proxy("a"));
+        assert_eq!(pool.count(), 1);
+        assert!(pool.contains("a"));
+    }
+
+    #[test]
+    fn remove_drops_a_proxy() {
+        let pool = ProxyPool::new(vec![proxy("a"), proxy("b")]);
+        pool.remove("a");
+        assert_eq!(pool.count(), 1);
+        assert!(!pool.contains("a"));
+        assert!(pool.contains("b"));
+    }
+
+    #[test]
+    fn children_are_visible_live() {
+        let child = ProxyPool::new(vec![proxy("a")]);
+        let parent = ProxyPool::new(Vec::new());
+        parent.add_child(Arc::clone(&child));
+        assert_eq!(parent.candidates("example.com").len(), 1);
+        child.push(proxy("b"));
+        assert_eq!(parent.candidates("example.com").len(), 2);
+        assert_eq!(parent.count(), 2);
+        assert!(parent.contains("b"));
     }
 
     #[test]

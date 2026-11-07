@@ -134,6 +134,10 @@ impl Account {
         }
     }
 
+    pub fn bridge_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed) && self.socks_port.load(Ordering::Relaxed) != 0
+    }
+
     pub async fn warm(&self) {
         if let Err(err) = self.live().await {
             tracing::debug!("openvpn [{}]: warm {err}", self.ip);
@@ -250,7 +254,7 @@ impl Tunnel for Account {
     }
 
     fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Relaxed) && self.socks_port.load(Ordering::Relaxed) != 0
+        self.bridge_ready()
     }
 
     fn generation(&self) -> u64 {

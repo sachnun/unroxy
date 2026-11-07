@@ -12,6 +12,8 @@ const MAX_ATTEMPTS: usize = 6;
 const POOL_MAX_IDLE: usize = 16;
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_TIMEOUT: Duration = Duration::from_secs(40);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct CachedClient {
     generation: u64,
@@ -55,6 +57,8 @@ impl RotatingTransport {
             .redirect(redirect::Policy::none())
             .pool_max_idle_per_host(POOL_MAX_IDLE)
             .pool_idle_timeout(Some(POOL_IDLE_TIMEOUT))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
         clients.insert(
             Arc::clone(&candidate.key),

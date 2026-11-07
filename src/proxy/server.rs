@@ -105,7 +105,6 @@ impl Region {
             .find(|variant| variant.protocol == protocol)
         {
             Some(existing) => {
-                merge_pool(&existing.pool, &pool);
                 if existing.forward.is_none() {
                     existing.forward = forward;
                 }
@@ -116,7 +115,8 @@ impl Region {
                 forward,
             }),
         }
-        merge_pool(&self.merged, &pool);
+        drop(variants);
+        self.merged.add_child(pool);
     }
 
     pub fn pool(&self, protocol: Option<Protocol>) -> Arc<ProxyPool> {
@@ -155,15 +155,6 @@ impl Region {
             .iter()
             .map(|variant| variant.protocol)
             .collect()
-    }
-}
-
-fn merge_pool(target: &Arc<ProxyPool>, source: &Arc<ProxyPool>) {
-    let known = target.proxies();
-    for proxy in source.proxies() {
-        if !known.iter().any(|existing| existing.key == proxy.key) {
-            target.push(proxy);
-        }
     }
 }
 
