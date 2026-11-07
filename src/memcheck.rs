@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::proxy as front;
+use crate::proxy::pool::Protocol;
 use crate::proxy::{PoolProxy, ProxyPool};
 
 static MEASURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -112,6 +113,7 @@ fn proxy_with(tunnel: Arc<crate::ssh::Tunnel>) -> Arc<front::Proxy> {
         key: "ssh://test".into(),
         tunnel,
         priority: 0,
+        protocol: Protocol::Ssh,
     }]);
     front::Proxy::new(pool, None)
 }

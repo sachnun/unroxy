@@ -104,18 +104,16 @@ impl DataCipher {
                 .encrypt(aes_gcm::Nonce::from_slice(&iv), payload)
                 .map_err(|_| Error::Data("gcm encrypt".into())),
         }?;
-        let mut out = Vec::with_capacity(4 + sealed.len());
-        out.extend_from_slice(&packet_id.to_be_bytes());
-        out.extend_from_slice(tag_first(&sealed, TAG_LEN).as_slice());
-        Ok(out)
+        Ok(tag_first(&sealed, TAG_LEN))
     }
 
     fn decrypt_aead(&self, header: &[u8], body: &[u8]) -> Result<(u32, Vec<u8>), Error> {
-        if body.len() < 4 + TAG_LEN {
+        if body.len() < TAG_LEN {
             return Err(Error::Data("short gcm packet".into()));
         }
-        let packet_id = u32::from_be_bytes(body[..4].try_into().expect("packet id"));
-        let sealed = tag_last(&body[4..]);
+        let packet_id =
+            u32::from_be_bytes(header[header.len() - 4..].try_into().expect("packet id"));
+        let sealed = tag_last(body);
         let iv = aead_nonce(&self.implicit_iv, packet_id);
         let payload = Payload {
             msg: &sealed,
@@ -255,15 +253,16 @@ mod tests {
     }
 
     #[test]
-    fn gcm_matches_openvpn_layout() {
+    fn gcm_roundtrip_with_packet_id_in_aad() {
         let cipher =
             DataCipher::new(Cipher::Aes128Gcm, Auth::Sha1, &key(16, 0), &key(20, 100)).unwrap();
-        let header = hex("481a2b3c");
-        let body = hex(
-            "0102030456e6c6ac8eda77849a19a64bf1cca0ebbec1f7dab7d87ae57430d3ffbcd091360f8bee470da59ad4c55bc59a",
-        );
+        let mut header = hex("481a2b3c");
+        header.extend_from_slice(&7u32.to_be_bytes());
+        let body = cipher
+            .encrypt(&header, 7, b"openvpn data channel payload")
+            .unwrap();
         let (packet_id, plaintext) = cipher.decrypt(&header, &body).expect("decrypt");
-        assert_eq!(packet_id, 0x01020304);
+        assert_eq!(packet_id, 7);
         assert_eq!(plaintext, b"openvpn data channel payload");
     }
 
@@ -283,7 +282,8 @@ mod tests {
     fn gcm_roundtrip() {
         let cipher =
             DataCipher::new(Cipher::Aes256Gcm, Auth::Sha1, &key(32, 7), &key(20, 9)).unwrap();
-        let header = hex("481a2b3c");
+        let mut header = hex("481a2b3c");
+        header.extend_from_slice(&42u32.to_be_bytes());
         let packet = cipher.encrypt(&header, 42, b"hello openvpn world").unwrap();
         let (packet_id, out) = cipher.decrypt(&header, &packet).unwrap();
         assert_eq!(packet_id, 42);

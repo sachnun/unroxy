@@ -7,6 +7,8 @@ use crate::openvpn::config::Auth;
 use crate::openvpn::config::Cipher;
 
 pub const MASTER_LEN: usize = 48;
+const KEY_LEN: usize = 64;
+const KEY2_LEN: usize = 4 * KEY_LEN;
 
 type HmacSha1 = Hmac<Sha1>;
 type HmacMd5 = Hmac<Md5>;
@@ -58,6 +60,31 @@ where
     mac.finalize().into_bytes().to_vec()
 }
 
+#[derive(Clone)]
+pub struct SeedData {
+    pub pre_master: [u8; 48],
+    pub client_random1: [u8; 32],
+    pub server_random1: [u8; 32],
+    pub client_random2: [u8; 32],
+    pub server_random2: [u8; 32],
+    pub client_sid: [u8; 8],
+    pub server_sid: [u8; 8],
+}
+
+impl SeedData {
+    pub fn as_seed(&self) -> Seed<'_> {
+        Seed {
+            pre_master: &self.pre_master,
+            client_random1: &self.client_random1,
+            server_random1: &self.server_random1,
+            client_random2: &self.client_random2,
+            server_random2: &self.server_random2,
+            client_sid: &self.client_sid,
+            server_sid: &self.server_sid,
+        }
+    }
+}
+
 pub struct Seed<'a> {
     pub pre_master: &'a [u8; 48],
     pub client_random1: &'a [u8; 32],
@@ -93,24 +120,18 @@ impl KeyMaterial {
             MASTER_LEN,
         );
         let key_len = cipher.key_len();
-        let total = 2 * key_len + 2 * mac_len;
         let expanded = prf(
             &master,
             "OpenVPN key expansion",
             &[client_random2, server_random2, client_sid, server_sid],
-            total,
+            KEY2_LEN,
         );
 
-        let mut offset = 0;
-        let mut take = |len: usize| {
-            let slice = expanded[offset..offset + len].to_vec();
-            offset += len;
-            slice
-        };
-        let mac_encrypt = take(mac_len);
-        let mac_decrypt = take(mac_len);
-        let encrypt = take(key_len);
-        let decrypt = take(key_len);
+        let encrypt = expanded[..key_len].to_vec();
+        let mac_encrypt = expanded[KEY_LEN..KEY_LEN + mac_len].to_vec();
+        let decrypt = expanded[KEY_LEN + KEY_LEN..KEY_LEN + KEY_LEN + key_len].to_vec();
+        let mac_decrypt =
+            expanded[KEY_LEN + KEY_LEN + KEY_LEN..KEY_LEN + KEY_LEN + KEY_LEN + mac_len].to_vec();
         Self {
             encrypt,
             decrypt,

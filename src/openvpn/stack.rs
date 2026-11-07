@@ -113,10 +113,15 @@ pub struct Stack {
 }
 
 impl Stack {
-    pub fn spawn(control: Control, local: Ipv4Address, protocol: Protocol) -> Arc<Self> {
+    pub fn spawn(
+        control: Control,
+        local: Ipv4Address,
+        remote: Option<Ipv4Address>,
+        protocol: Protocol,
+    ) -> Arc<Self> {
         let (commands, rx) = mpsc::channel(QUEUE);
         let stack = Arc::new(Self { commands });
-        tokio::spawn(run(control, local, protocol, rx));
+        tokio::spawn(run(control, local, remote, protocol, rx));
         stack
     }
 
@@ -137,6 +142,7 @@ impl Stack {
 async fn run(
     mut control: Control,
     local: Ipv4Address,
+    remote: Option<Ipv4Address>,
     protocol: Protocol,
     mut commands: mpsc::Receiver<Command>,
 ) {
@@ -149,8 +155,10 @@ async fn run(
     config.random_seed = rand::random();
     let mut iface = Interface::new(config, &mut StackDevice { state: &mut device }, clock.now());
     iface.update_ip_addrs(|addrs| {
-        let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(local), 24));
+        let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(local), 32));
     });
+    let gateway = remote.unwrap_or_else(|| Ipv4Address::new(10, 8, 0, 1));
+    let _ = iface.routes_mut().add_default_ipv4_route(gateway);
     let mut sockets = SocketSet::new(Vec::new());
     let mut conns: Vec<Conn> = Vec::new();
     let mut ticker = tokio::time::interval(TICK);
@@ -187,7 +195,6 @@ async fn run(
                     }
                     None => break,
                 }
-                continue;
             }
             packet = control.recv_data(TICK) => {
                 if let Ok(Some(packet)) = packet
@@ -203,6 +210,12 @@ async fn run(
             clock.now(),
             &mut StackDevice { state: &mut device },
             &mut sockets,
+        );
+        tracing::trace!(
+            "poll conns={} in={} out={}",
+            conns.len(),
+            device.inbound.len(),
+            device.outbound.len()
         );
 
         while let Some(packet) = device.outbound.pop_front() {

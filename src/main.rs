@@ -1,5 +1,4 @@
 mod config;
-mod dial;
 mod emulation;
 mod forward;
 mod geo;
@@ -21,7 +20,9 @@ use crate::proxy::Server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("unroxy=info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let handler = config::build().await;
     let listener = TcpListener::bind(("0.0.0.0", config::DEFAULT_PORT)).await?;

@@ -11,7 +11,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use crate::proxy::exit::ExitCache;
-use crate::proxy::pool::ProxyPool;
+use crate::proxy::pool::{Protocol, ProxyPool};
 
 pub type Body = BoxBody<Bytes, std::io::Error>;
 
@@ -75,15 +75,101 @@ pub trait Forward: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Response<Body>, Error>>;
 }
 
-pub struct Region {
-    pub name: String,
-    pub username: String,
+pub struct Variant {
+    pub protocol: Protocol,
     pub pool: Arc<ProxyPool>,
     pub forward: Option<Arc<dyn Forward>>,
 }
 
+pub struct Region {
+    pub name: String,
+    pub username: String,
+    variants: RwLock<Vec<Variant>>,
+    merged: Arc<ProxyPool>,
+}
+
+impl Region {
+    pub fn new(name: String, username: String) -> Self {
+        Self {
+            name,
+            username,
+            variants: RwLock::new(Vec::new()),
+            merged: ProxyPool::new(Vec::new()),
+        }
+    }
+
+    pub fn add(&self, protocol: Protocol, pool: Arc<ProxyPool>, forward: Option<Arc<dyn Forward>>) {
+        let mut variants = self.variants.write().expect("variant lock");
+        match variants
+            .iter_mut()
+            .find(|variant| variant.protocol == protocol)
+        {
+            Some(existing) => {
+                merge_pool(&existing.pool, &pool);
+                if existing.forward.is_none() {
+                    existing.forward = forward;
+                }
+            }
+            None => variants.push(Variant {
+                protocol,
+                pool: Arc::clone(&pool),
+                forward,
+            }),
+        }
+        merge_pool(&self.merged, &pool);
+    }
+
+    pub fn pool(&self, protocol: Option<Protocol>) -> Arc<ProxyPool> {
+        match protocol {
+            Some(wanted) => self
+                .variants
+                .read()
+                .expect("variant lock")
+                .iter()
+                .find(|variant| variant.protocol == wanted)
+                .map(|variant| Arc::clone(&variant.pool))
+                .unwrap_or_else(|| ProxyPool::new(Vec::new())),
+            None => Arc::clone(&self.merged),
+        }
+    }
+
+    pub fn forward(&self, protocol: Option<Protocol>) -> Option<Arc<dyn Forward>> {
+        let variants = self.variants.read().expect("variant lock");
+        match protocol {
+            Some(wanted) => variants
+                .iter()
+                .find(|variant| variant.protocol == wanted)
+                .and_then(|variant| variant.forward.clone()),
+            None => variants
+                .iter()
+                .find(|variant| variant.protocol == Protocol::Ssh)
+                .or_else(|| variants.first())
+                .and_then(|variant| variant.forward.clone()),
+        }
+    }
+
+    pub fn protocols(&self) -> Vec<Protocol> {
+        self.variants
+            .read()
+            .expect("variant lock")
+            .iter()
+            .map(|variant| variant.protocol)
+            .collect()
+    }
+}
+
+fn merge_pool(target: &Arc<ProxyPool>, source: &Arc<ProxyPool>) {
+    let known = target.proxies();
+    for proxy in source.proxies() {
+        if !known.iter().any(|existing| existing.key == proxy.key) {
+            target.push(proxy);
+        }
+    }
+}
+
 pub struct PoolStat {
     pub name: String,
+    pub protocols: Vec<Protocol>,
     pub proxies: usize,
     pub tunnels: usize,
     pub usable: usize,
@@ -92,6 +178,8 @@ pub struct PoolStat {
 pub struct Proxy {
     default_pool: Arc<ProxyPool>,
     default_forward: RwLock<Option<Arc<dyn Forward>>>,
+    protocol_pools: RwLock<Vec<(Protocol, Arc<ProxyPool>)>>,
+    protocol_forwards: RwLock<Vec<(Protocol, Arc<dyn Forward>)>>,
     regions: RwLock<Vec<Arc<Region>>>,
     pub exits: ExitCache,
 }
@@ -104,13 +192,46 @@ impl Proxy {
         Arc::new(Self {
             default_pool,
             default_forward: RwLock::new(default_forward),
+            protocol_pools: RwLock::new(Vec::new()),
+            protocol_forwards: RwLock::new(Vec::new()),
             regions: RwLock::new(Vec::new()),
             exits: ExitCache::default(),
         })
     }
 
+    pub fn set_protocol_route(
+        &self,
+        protocol: Protocol,
+        pool: Arc<ProxyPool>,
+        forward: Arc<dyn Forward>,
+    ) {
+        let mut pools = self.protocol_pools.write().expect("protocol pool lock");
+        pools.retain(|(known, _)| *known != protocol);
+        pools.push((protocol, pool));
+        drop(pools);
+
+        let mut forwards = self.protocol_forwards.write().expect("protocol lock");
+        forwards.retain(|(known, _)| *known != protocol);
+        forwards.push((protocol, forward));
+    }
+
     pub fn add_region(&self, region: Arc<Region>) {
-        self.regions.write().expect("region lock").push(region);
+        let mut regions = self.regions.write().expect("region lock");
+        let Some(existing) = regions
+            .iter()
+            .find(|current| current.username.eq_ignore_ascii_case(&region.username))
+            .cloned()
+        else {
+            regions.push(region);
+            return;
+        };
+        for protocol in region.protocols() {
+            existing.add(
+                protocol,
+                region.pool(Some(protocol)),
+                region.forward(Some(protocol)),
+            );
+        }
     }
 
     pub fn region(&self, username: &str) -> Option<Arc<Region>> {
@@ -125,19 +246,36 @@ impl Proxy {
             .cloned()
     }
 
-    fn forward_for(&self, username: &str) -> Option<Arc<dyn Forward>> {
+    fn forward_for(&self, username: &str, protocol: Option<Protocol>) -> Option<Arc<dyn Forward>> {
         if let Some(region) = self.region(username)
-            && let Some(forward) = &region.forward
+            && let Some(forward) = region.forward(protocol)
         {
-            return Some(Arc::clone(forward));
+            return Some(forward);
+        }
+        if let Some(protocol) = protocol {
+            return self
+                .protocol_forwards
+                .read()
+                .expect("protocol lock")
+                .iter()
+                .find(|(known, _)| *known == protocol)
+                .map(|(_, forward)| Arc::clone(forward));
         }
         self.default_forward.read().expect("forward lock").clone()
     }
 
-    fn pool_for(&self, username: &str) -> Arc<ProxyPool> {
-        self.region(username)
-            .map(|region| Arc::clone(&region.pool))
-            .unwrap_or_else(|| Arc::clone(&self.default_pool))
+    fn pool_for(&self, username: &str, protocol: Option<Protocol>) -> Arc<ProxyPool> {
+        if let Some(region) = self.region(username) {
+            return region.pool(protocol);
+        }
+        if let Some(protocol) = protocol {
+            let pools = self.protocol_pools.read().expect("protocol pool lock");
+            if let Some((_, pool)) = pools.iter().find(|(known, _)| *known == protocol) {
+                return Arc::clone(pool);
+            }
+            return ProxyPool::new(Vec::new());
+        }
+        Arc::clone(&self.default_pool)
     }
 
     pub fn stats(&self) -> Vec<PoolStat> {
@@ -145,13 +283,29 @@ impl Proxy {
             .read()
             .expect("region lock")
             .iter()
-            .map(|region| PoolStat {
-                name: region.name.clone(),
-                proxies: region.pool.count(),
-                tunnels: region.pool.tunnel_count(),
-                usable: region.pool.usable_count(),
+            .map(|region| {
+                let pool = region.pool(None);
+                PoolStat {
+                    name: region.name.clone(),
+                    protocols: region.protocols(),
+                    proxies: pool.count(),
+                    tunnels: pool.tunnel_count(),
+                    usable: pool.usable_count(),
+                }
             })
             .collect()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Route {
+    pub region: Option<String>,
+    pub protocol: Option<Protocol>,
+}
+
+impl Route {
+    pub fn region(&self) -> &str {
+        self.region.as_deref().unwrap_or_default()
     }
 }
 
@@ -246,7 +400,7 @@ async fn handle_connect(proxy: Arc<Proxy>, request: Request<Incoming>) -> Respon
     let (host, port) = split_authority(&authority, "https");
 
     let username = auth_username(request.headers());
-    let pool = proxy.pool_for(&username);
+    let pool = proxy.pool_for(&username, None);
     let Some(candidate) = pool.pick(&host).await else {
         return error_response(&Error::UnknownRegion);
     };
@@ -259,7 +413,8 @@ async fn handle_connect(proxy: Arc<Proxy>, request: Request<Incoming>) -> Respon
     };
     proxy.exits.record(&host, candidate.tunnel.exit_for(&host));
     tracing::info!(
-        "CONNECT tunnel {host}:{port} established via {}",
+        "CONNECT tunnel {host}:{port} established via {} {}",
+        candidate.protocol.as_str(),
         candidate.key
     );
 
@@ -290,7 +445,7 @@ async fn absolute(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Respo
 
     let username = auth_username(request.headers());
     let forward = proxy
-        .forward_for(&username)
+        .forward_for(&username, None)
         .ok_or(Error::ForwardUnavailable)?;
     let target = Target {
         scheme,
@@ -305,7 +460,7 @@ async fn absolute(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Respo
 }
 
 async fn rewrite(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Response<Body>, Error> {
-    let Some((region, target)) = parse_path(request.uri()) else {
+    let Some((route, target)) = parse_path(request.uri()) else {
         return Ok(index_page(
             &proxy,
             request.headers().get(hyper::header::HOST),
@@ -313,7 +468,7 @@ async fn rewrite(proxy: Arc<Proxy>, request: Request<Incoming>) -> Result<Respon
     };
 
     let forward = proxy
-        .forward_for(region.as_deref().unwrap_or_default())
+        .forward_for(route.region(), route.protocol)
         .ok_or(Error::ForwardUnavailable)?;
     forward.forward(request, target, &proxy.exits).await
 }
@@ -384,20 +539,34 @@ pub fn split_authority(authority: &str, scheme: &str) -> (String, u16) {
     (authority.trim_matches(['[', ']']).to_string(), port)
 }
 
-fn parse_path(uri: &Uri) -> Option<(Option<String>, Target)> {
+fn parse_path(uri: &Uri) -> Option<(Route, Target)> {
     let mut rest = uri.path().trim_start_matches('/');
     if rest.is_empty() {
         return None;
     }
 
+    let mut protocol = None;
     let mut region = None;
-    if let Some((first, tail)) = rest.split_once('/')
-        && !first.is_empty()
-        && !first.contains('.')
-        && !first.contains(':')
-    {
-        region = Some(first.to_ascii_uppercase());
-        rest = tail;
+    for _ in 0..2 {
+        let Some((head, tail)) = rest.split_once('/') else {
+            break;
+        };
+        if head.is_empty() || head.contains('.') || head.contains(':') {
+            break;
+        }
+        if protocol.is_none()
+            && let Some(parsed) = Protocol::parse(head)
+        {
+            protocol = Some(parsed);
+            rest = tail;
+            continue;
+        }
+        if region.is_none() {
+            region = Some(head.to_ascii_uppercase());
+            rest = tail;
+            continue;
+        }
+        break;
     }
 
     let lower = rest.to_ascii_lowercase();
@@ -428,7 +597,7 @@ fn parse_path(uri: &Uri) -> Option<(Option<String>, Target)> {
     }
 
     Some((
-        region,
+        Route { region, protocol },
         Target {
             scheme: scheme.to_string(),
             host: domain.to_string(),
@@ -478,6 +647,8 @@ fn index_page(proxy: &Proxy, host: Option<&hyper::header::HeaderValue>) -> Respo
     out.push_str(&format!(
         "            curl http://{host}/https://ipwho.is\n"
     ));
+    out.push_str(&format!("  Protocol  curl http://{host}/ssh/ca/ipwho.is\n"));
+    out.push_str(&format!("            curl http://{host}/vpn/ca/ipwho.is\n"));
 
     let stats = proxy.stats();
     if !stats.is_empty() {
@@ -492,7 +663,7 @@ fn index_page(proxy: &Proxy, host: Option<&hyper::header::HeaderValue>) -> Respo
                 out.push_str(&format!("  {entry:<12}"));
             } else {
                 out.push_str(&format!("{entry:<12}"));
-            }
+            };
             if index % 5 == 4 || index == stats.len() - 1 {
                 out.push('\n');
             }
@@ -500,11 +671,20 @@ fn index_page(proxy: &Proxy, host: Option<&hyper::header::HeaderValue>) -> Respo
         let tunnels: usize = stats.iter().map(|stat| stat.tunnels).sum();
         let usable: usize = stats.iter().map(|stat| stat.usable).sum();
         let proxies: usize = stats.iter().map(|stat| stat.proxies).sum();
+        let ssh = stats
+            .iter()
+            .filter(|stat| stat.protocols.contains(&Protocol::Ssh))
+            .count();
+        let vpn = stats
+            .iter()
+            .filter(|stat| stat.protocols.contains(&Protocol::Vpn))
+            .count();
         if tunnels > 0 {
             out.push_str(&format!("\nTotal: {usable}/{tunnels} usable\n"));
         } else {
             out.push_str(&format!("\nTotal: {proxies} proxies\n"));
         }
+        out.push_str(&format!("Pools: {ssh} ssh, {vpn} vpn\n"));
     }
 
     Response::builder()
@@ -591,8 +771,9 @@ mod tests {
     #[test]
     fn parses_region_prefixed_path() {
         let uri: Uri = "/SG/example.com/path?q=1".parse().expect("uri");
-        let (region, target) = parse_path(&uri).expect("target");
-        assert_eq!(region.as_deref(), Some("SG"));
+        let (route, target) = parse_path(&uri).expect("target");
+        assert_eq!(route.region.as_deref(), Some("SG"));
+        assert_eq!(route.protocol, None);
         assert_eq!(target.host, "example.com");
         assert_eq!(target.scheme, "https");
         assert_eq!(target.path, "/path");
@@ -600,10 +781,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_protocol_prefixed_paths() {
+        let uri: Uri = "/ssh/ca/example.com/a".parse().expect("uri");
+        let (route, target) = parse_path(&uri).expect("target");
+        assert_eq!(route.protocol, Some(Protocol::Ssh));
+        assert_eq!(route.region.as_deref(), Some("CA"));
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.path, "/a");
+
+        let uri: Uri = "/vpn/de/example.com".parse().expect("uri");
+        let (route, target) = parse_path(&uri).expect("target");
+        assert_eq!(route.protocol, Some(Protocol::Vpn));
+        assert_eq!(route.region.as_deref(), Some("DE"));
+        assert_eq!(target.host, "example.com");
+
+        let uri: Uri = "/ssh/example.com".parse().expect("uri");
+        let (route, target) = parse_path(&uri).expect("target");
+        assert_eq!(route.protocol, Some(Protocol::Ssh));
+        assert_eq!(route.region, None);
+        assert_eq!(target.host, "example.com");
+    }
+
+    #[test]
+    fn keeps_region_only_paths_working() {
+        let uri: Uri = "/ca/example.com".parse().expect("uri");
+        let (route, target) = parse_path(&uri).expect("target");
+        assert_eq!(route.protocol, None);
+        assert_eq!(route.region.as_deref(), Some("CA"));
+        assert_eq!(target.host, "example.com");
+    }
+
+    #[test]
     fn parses_path_without_region() {
         let uri: Uri = "/https://example.com/a".parse().expect("uri");
-        let (region, target) = parse_path(&uri).expect("target");
-        assert_eq!(region, None);
+        let (route, target) = parse_path(&uri).expect("target");
+        assert_eq!(route.region, None);
+        assert_eq!(route.protocol, None);
         assert_eq!(target.scheme, "https");
         assert_eq!(target.host, "example.com");
         assert_eq!(target.path, "/a");
@@ -622,6 +835,7 @@ mod tests {
         assert!(parse_path(&"/localhost/x".parse().expect("uri")).is_none());
         assert!(parse_path(&"/exa%20mple.com/x".parse().expect("uri")).is_none());
         assert!(parse_path(&"/example..com/x".parse().expect("uri")).is_none());
+        assert!(parse_path(&"/ssh/ca/".parse().expect("uri")).is_none());
     }
 
     #[test]

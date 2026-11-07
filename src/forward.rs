@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::proxy::Exit;
+use crate::proxy::pool::Protocol;
 use crate::proxy::{
     Body, Error, ExitCache, Forward, ForwardFactory, ProxyPool, Target, strip_client_headers,
     strip_hop_headers,
@@ -17,11 +18,26 @@ pub struct WreqFactory;
 
 impl ForwardFactory for WreqFactory {
     fn region_forward(&self, _region: &str, pool: Arc<ProxyPool>) -> Option<Arc<dyn Forward>> {
-        Some(Arc::new(WreqForward::new(RotatingTransport::new(pool))))
+        Some(Arc::new(WreqForward::new(RotatingTransport::new(
+            pool, None,
+        ))))
+    }
+
+    fn protocol_forward(
+        &self,
+        protocol: Protocol,
+        pool: Arc<ProxyPool>,
+    ) -> Option<Arc<dyn Forward>> {
+        Some(Arc::new(WreqForward::new(RotatingTransport::new(
+            pool,
+            Some(protocol),
+        ))))
     }
 
     fn default_forward(&self, pool: Arc<ProxyPool>) -> Option<Arc<dyn Forward>> {
-        Some(Arc::new(WreqForward::new(RotatingTransport::new(pool))))
+        Some(Arc::new(WreqForward::new(RotatingTransport::new(
+            pool, None,
+        ))))
     }
 }
 
@@ -80,7 +96,12 @@ async fn send(
         .map_err(|err| Error::Forward(err.to_string()))?;
     let status = response.status();
     exits.record(&target.host, candidate.tunnel.exit_for(&target.host));
-    tracing::info!("{method} {} -> {status} ({})", target.host, candidate.key);
+    tracing::info!(
+        "{method} {} -> {status} ({} {})",
+        target.host,
+        candidate.protocol.as_str(),
+        candidate.key
+    );
 
     let exit = exits.get(&target.host);
     let response: http::Response<wreq::Body> = response.into();

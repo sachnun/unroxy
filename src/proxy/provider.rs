@@ -1,13 +1,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::proxy::pool::{Connection, PoolProxy, ProxyPool, Tunnel};
+use crate::proxy::pool::{Connection, PoolProxy, Protocol, ProxyPool, Tunnel};
 use crate::proxy::server::{Forward, Proxy, Region};
 use crate::ssh::{Config, Tunnel as SshTunnel};
 
 pub trait ForwardFactory: Send + Sync + 'static {
     fn region_forward(&self, region: &str, pool: Arc<ProxyPool>) -> Option<Arc<dyn Forward>>;
     fn default_forward(&self, pool: Arc<ProxyPool>) -> Option<Arc<dyn Forward>>;
+
+    fn protocol_forward(
+        &self,
+        _protocol: Protocol,
+        pool: Arc<ProxyPool>,
+    ) -> Option<Arc<dyn Forward>> {
+        self.default_forward(pool)
+    }
 }
 
 #[derive(Clone)]
@@ -125,26 +133,19 @@ impl Provider {
 
     pub fn add(&mut self, region: &str, tunnel: Arc<SshTunnel>) {
         let key: Arc<str> = Arc::from(format!("ssh://{region}"));
-        let pool = ProxyPool::new(vec![PoolProxy {
-            key: Arc::clone(&key),
-            tunnel: Arc::clone(&tunnel) as Arc<dyn Tunnel>,
-            priority: 0,
-        }]);
-        let forward = self.factory.region_forward(region, Arc::clone(&pool));
-        self.handler.add_region(Arc::new(Region {
-            name: region.to_string(),
-            username: region.to_string(),
-            pool,
-            forward,
-        }));
-
-        let mut primaries = self.primaries.proxies();
-        primaries.push(PoolProxy {
+        let proxy = PoolProxy {
             key,
             tunnel: Arc::clone(&tunnel) as Arc<dyn Tunnel>,
             priority: 0,
-        });
-        self.primaries.replace(primaries);
+            protocol: Protocol::Ssh,
+        };
+        let pool = ProxyPool::new(vec![proxy.clone()]);
+        let forward = self.factory.region_forward(region, Arc::clone(&pool));
+        let entry = Region::new(region.to_string(), region.to_string());
+        entry.add(Protocol::Ssh, pool, forward);
+        self.handler.add_region(Arc::new(entry));
+
+        self.primaries.push(proxy);
 
         spawn_refresh(self.config.clone(), region.to_string(), tunnel);
     }

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::proxy::{Provider, ProviderConfig, Proxy};
+use crate::proxy::pool::Protocol;
+use crate::proxy::{Provider, ProviderConfig, Proxy, ProxyPool};
 use crate::vpn::Config as VpnConfig;
 
 use crate::forward::WreqFactory;
@@ -43,5 +44,14 @@ pub async fn build() -> Arc<Proxy> {
 
     let regions = provider.start().await;
     tracing::info!("ssh: {regions} regions online");
+
+    for protocol in [Protocol::Ssh, Protocol::Vpn] {
+        let pool = ProxyPool::new(Vec::new());
+        if let Some(forward) = vpn.protocol_route(protocol, Arc::clone(&pool)) {
+            handler.set_protocol_route(protocol, pool, forward);
+        }
+    }
+
+    tracing::info!("routes: {} regions", handler.stats().len());
     handler
 }

@@ -67,10 +67,6 @@ impl MemoryStream {
         self.inbound.extend(data);
     }
 
-    pub fn pending_inbound(&self) -> usize {
-        self.inbound.len()
-    }
-
     pub fn take_outbound(&mut self) -> Vec<u8> {
         self.outbound.drain(..).collect()
     }
@@ -82,9 +78,13 @@ impl Read for MemoryStream {
             return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
         }
         let len = buf.len().min(self.inbound.len());
-        for slot in buf.iter_mut().take(len) {
-            *slot = self.inbound.pop_front().expect("inbound");
+        let (head, tail) = self.inbound.as_slices();
+        let taken = len.min(head.len());
+        buf[..taken].copy_from_slice(&head[..taken]);
+        if taken < len {
+            buf[taken..len].copy_from_slice(&tail[..len - taken]);
         }
+        self.inbound.drain(..len);
         Ok(len)
     }
 }
@@ -134,8 +134,6 @@ impl TlsState {
         }
         if let Some(stream) = self.stream.as_mut() {
             stream.get_mut().feed(ciphertext);
-        }
-        if self.stream.is_some() {
             self.pump()?;
             return Ok(());
         }
@@ -169,17 +167,16 @@ impl TlsState {
         };
         let mut buffer = [0u8; 16 * 1024];
         loop {
-            if stream.ssl().pending() == 0 && stream.get_ref().pending_inbound() == 0 {
-                break;
-            }
             match stream.ssl_read(&mut buffer) {
-                Ok(0) => {
+                Ok(0) => break,
+                Ok(n) => {
+                    tracing::trace!("pump plaintext {n}");
+                    self.plaintext.extend_from_slice(&buffer[..n])
+                }
+                Err(err) => {
+                    tracing::trace!("pump want {err:?}");
                     break;
                 }
-                Ok(n) => {
-                    self.plaintext.extend_from_slice(&buffer[..n]);
-                }
-                Err(_) => break,
             }
         }
         Ok(())

@@ -25,11 +25,37 @@ pub trait Tunnel: Send + Sync + 'static {
     fn exit_for(&self, host: &str) -> Exit;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Protocol {
+    Ssh,
+    Vpn,
+}
+
+impl Protocol {
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("ssh") {
+            Some(Self::Ssh)
+        } else if value.eq_ignore_ascii_case("vpn") {
+            Some(Self::Vpn)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Vpn => "vpn",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PoolProxy {
     pub key: Arc<str>,
     pub tunnel: Arc<dyn Tunnel>,
     pub priority: usize,
+    pub protocol: Protocol,
 }
 
 #[derive(Clone)]
@@ -37,6 +63,7 @@ pub struct Candidate {
     pub key: Arc<str>,
     pub tunnel: Arc<dyn Tunnel>,
     pub priority: usize,
+    pub protocol: Protocol,
 }
 
 impl Candidate {
@@ -63,20 +90,27 @@ impl ProxyPool {
     }
 
     pub fn candidates(&self, _target_host: &str) -> Vec<Candidate> {
-        let inner = self.inner.read().expect("pool lock");
-        if inner.proxies.is_empty() {
-            return Vec::new();
-        }
+        self.filtered(None, _target_host)
+    }
 
+    pub fn candidates_for(&self, protocol: Protocol, target_host: &str) -> Vec<Candidate> {
+        self.filtered(Some(protocol), target_host)
+    }
+
+    fn filtered(&self, protocol: Option<Protocol>, _target_host: &str) -> Vec<Candidate> {
+        let inner = self.inner.read().expect("pool lock");
         let mut ready: Vec<Candidate> = inner
             .proxies
             .iter()
+            .filter(|proxy| protocol.is_none_or(|wanted| proxy.protocol == wanted))
             .map(|proxy| Candidate {
                 key: proxy.key.clone(),
                 tunnel: Arc::clone(&proxy.tunnel),
                 priority: proxy.priority,
+                protocol: proxy.protocol,
             })
             .collect();
+
         ready.sort_by_key(|candidate| candidate.priority);
 
         if ready.len() > 1 {
@@ -88,8 +122,12 @@ impl ProxyPool {
     }
 
     pub async fn pick(&self, target_host: &str) -> Option<Candidate> {
+        self.select(None, target_host).await
+    }
+
+    async fn select(&self, protocol: Option<Protocol>, target_host: &str) -> Option<Candidate> {
         loop {
-            let candidates = self.candidates(target_host);
+            let candidates = self.filtered(protocol, target_host);
             if candidates.is_empty() {
                 return None;
             }
@@ -104,9 +142,9 @@ impl ProxyPool {
         self.inner.read().expect("pool lock").proxies.clone()
     }
 
-    pub fn replace(&self, proxies: Vec<PoolProxy>) {
+    pub fn push(&self, proxy: PoolProxy) {
         let mut inner = self.inner.write().expect("pool lock");
-        inner.proxies = proxies;
+        inner.proxies.push(proxy);
     }
 
     pub fn count(&self) -> usize {
@@ -186,6 +224,7 @@ mod tests {
             key: key.into(),
             tunnel: stub(1),
             priority: 0,
+            protocol: Protocol::Ssh,
         }
     }
 
@@ -234,5 +273,49 @@ mod tests {
                 .candidates("example.com")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn filters_candidates_by_protocol() {
+        let pool = ProxyPool::new(vec![
+            proxy("ssh://a"),
+            PoolProxy {
+                protocol: Protocol::Vpn,
+                ..proxy("openvpn://b")
+            },
+            proxy("ssh://c"),
+        ]);
+        let ssh = pool.candidates_for(Protocol::Ssh, "example.com");
+        let vpn = pool.candidates_for(Protocol::Vpn, "example.com");
+        assert_eq!(ssh.len(), 2);
+        assert_eq!(vpn.len(), 1);
+        assert!(ssh.iter().all(|c| c.protocol == Protocol::Ssh));
+        assert_eq!(pool.candidates("example.com").len(), 3);
+    }
+
+    #[test]
+    fn rotation_mixes_protocols() {
+        let pool = ProxyPool::new(vec![
+            proxy("ssh://a"),
+            PoolProxy {
+                protocol: Protocol::Vpn,
+                ..proxy("openvpn://b")
+            },
+        ]);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            seen.insert(pool.candidates("example.com")[0].protocol);
+        }
+        assert_eq!(seen.len(), 2, "rotation should reach both protocols");
+    }
+
+    #[test]
+    fn push_grows_the_pool() {
+        let pool = ProxyPool::new(vec![proxy("ssh://a")]);
+        pool.push(PoolProxy {
+            protocol: Protocol::Vpn,
+            ..proxy("openvpn://b")
+        });
+        assert_eq!(pool.count(), 2);
     }
 }

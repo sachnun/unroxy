@@ -30,6 +30,7 @@ pub struct Account {
     profile: Profile,
     config: Config,
     tunnel: tokio::sync::Mutex<Option<Arc<Live>>>,
+    socks_port: AtomicUsize,
     failures: AtomicUsize,
     not_before: AtomicU64,
     generation: AtomicU64,
@@ -56,6 +57,7 @@ impl Account {
             profile,
             config,
             tunnel: tokio::sync::Mutex::new(None),
+            socks_port: AtomicUsize::new(0),
             failures: AtomicUsize::new(0),
             not_before: AtomicU64::new(0),
             generation: AtomicU64::new(0),
@@ -65,6 +67,10 @@ impl Account {
 
     pub fn name(&self) -> &str {
         &self.ip
+    }
+
+    pub fn region(&self) -> &str {
+        &self.region
     }
 
     fn backoff(&self) -> Duration {
@@ -90,13 +96,23 @@ impl Account {
         };
         match VpnTunnel::connect(&self.profile, config).await {
             Ok(tunnel) => {
+                let tunnel = Arc::new(tunnel);
+                let socks_port = match spawn_socks(Arc::clone(&tunnel)).await {
+                    Ok(port) => port,
+                    Err(err) => {
+                        tracing::warn!("openvpn [{}]: socks bridge {err}", self.ip);
+                        return Err(err);
+                    }
+                };
                 let live = Arc::new(Live {
-                    tunnel: Arc::new(tunnel),
+                    tunnel,
                     connections: AtomicUsize::new(0),
                     idle_since: RwLock::new(None),
                 });
                 self.failures.store(0, Ordering::Relaxed);
                 self.ready.store(true, Ordering::Relaxed);
+                self.socks_port
+                    .store(socks_port as usize, Ordering::Relaxed);
                 tracing::info!("openvpn [{}]: up ({})", self.ip, live.tunnel.cipher());
                 *slot = Some(Arc::clone(&live));
                 Ok(live)
@@ -115,6 +131,12 @@ impl Account {
                 );
                 Err(err.to_string())
             }
+        }
+    }
+
+    pub async fn warm(&self) {
+        if let Err(err) = self.live().await {
+            tracing::debug!("openvpn [{}]: warm {err}", self.ip);
         }
     }
 
@@ -151,12 +173,9 @@ impl Account {
         *live.idle_since.write().expect("idle lock") = None;
         self.ready.store(false, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Relaxed);
+        self.socks_port.store(0, Ordering::Relaxed);
         *slot = None;
         tracing::debug!("openvpn [{}]: idle close", self.ip);
-    }
-
-    pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Relaxed)
     }
 }
 
@@ -227,11 +246,11 @@ impl Tunnel for Account {
     }
 
     fn active_tunnels(&self) -> usize {
-        usize::from(self.is_ready())
+        usize::from(self.ready.load(Ordering::Relaxed))
     }
 
     fn is_ready(&self) -> bool {
-        self.is_ready()
+        self.ready.load(Ordering::Relaxed) && self.socks_port.load(Ordering::Relaxed) != 0
     }
 
     fn generation(&self) -> u64 {
@@ -239,7 +258,11 @@ impl Tunnel for Account {
     }
 
     fn proxy_url(&self) -> Option<String> {
-        None
+        let port = self.socks_port.load(Ordering::Relaxed);
+        if port == 0 {
+            return None;
+        }
+        Some(format!("socks5h://127.0.0.1:{port}"))
     }
 
     fn dial<'a>(
@@ -322,6 +345,85 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+async fn spawn_socks(tunnel: Arc<VpnTunnel>) -> Result<u16, String> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|err| err.to_string())?;
+    let port = listener.local_addr().map_err(|err| err.to_string())?.port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((client, _)) = listener.accept().await else {
+                return;
+            };
+            let tunnel = Arc::clone(&tunnel);
+            tokio::spawn(async move {
+                let _ = serve_socks(client, tunnel).await;
+            });
+        }
+    });
+    Ok(port)
+}
+
+async fn serve_socks(
+    mut client: tokio::net::TcpStream,
+    tunnel: Arc<VpnTunnel>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut greeting = [0u8; 2];
+    client.read_exact(&mut greeting).await?;
+    if greeting[0] != 0x05 {
+        return Ok(());
+    }
+    let mut methods = vec![0u8; greeting[1] as usize];
+    client.read_exact(&mut methods).await?;
+    client.write_all(&[0x05, 0x00]).await?;
+
+    let mut request = [0u8; 4];
+    client.read_exact(&mut request).await?;
+    if request[0] != 0x05 || request[1] != 0x01 {
+        return Ok(());
+    }
+    let host = match request[3] {
+        0x01 => {
+            let mut address = [0u8; 4];
+            client.read_exact(&mut address).await?;
+            std::net::Ipv4Addr::from(address).to_string()
+        }
+        0x04 => {
+            let mut address = [0u8; 16];
+            client.read_exact(&mut address).await?;
+            std::net::Ipv6Addr::from(address).to_string()
+        }
+        0x03 => {
+            let mut length = [0u8; 1];
+            client.read_exact(&mut length).await?;
+            let mut address = vec![0u8; length[0] as usize];
+            client.read_exact(&mut address).await?;
+            String::from_utf8_lossy(&address).into_owned()
+        }
+        _ => return Ok(()),
+    };
+    let mut port = [0u8; 2];
+    client.read_exact(&mut port).await?;
+    let port = u16::from_be_bytes(port);
+
+    match tunnel.open(&host, port).await {
+        Ok(mut remote) => {
+            client
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await?;
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await;
+        }
+        Err(_) => {
+            client
+                .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,12 +502,27 @@ mod tests {
     fn account_is_keyed_by_ip() {
         let account = account("103.6.52.13", "ID");
         assert_eq!(account.name(), "103.6.52.13");
-        assert_eq!(account.region, "ID");
-        assert!(!account.is_ready());
+        assert_eq!(account.region(), "ID");
+        assert!(!Tunnel::is_ready(account.as_ref()));
         assert_eq!(account.target_pool(), 1);
         assert_eq!(account.active_tunnels(), 0);
         assert_eq!(account.generation(), 0);
         assert_eq!(account.proxy_url(), None);
+    }
+
+    #[test]
+    fn failed_account_backs_off() {
+        let account = account("103.6.52.13", "ID");
+        account.failures.store(2, Ordering::Relaxed);
+        account
+            .not_before
+            .store(now_millis() + 60_000, Ordering::Relaxed);
+        assert!(!Tunnel::is_ready(account.as_ref()));
+        account.not_before.store(0, Ordering::Relaxed);
+        assert!(!Tunnel::is_ready(account.as_ref()));
+        account.socks_port.store(1234, Ordering::Relaxed);
+        account.ready.store(true, Ordering::Relaxed);
+        assert!(Tunnel::is_ready(account.as_ref()));
     }
 
     #[test]

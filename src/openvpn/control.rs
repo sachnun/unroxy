@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::openvpn::config::{Auth, Cipher, Profile, Protocol, Server};
-use crate::openvpn::crypto::{DataCipher, KeyMaterial, PeerId, ReplayWindow};
+use crate::openvpn::crypto::{DataCipher, KeyMaterial, PeerId, ReplayWindow, SeedData};
 use crate::openvpn::error::Error;
 use crate::openvpn::framing;
 use crate::openvpn::tls::{CredentialStore, TlsState};
@@ -20,6 +20,9 @@ pub const SID_SIZE: usize = 8;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ACKS: usize = 4;
+const MAX_CONTROL_PAYLOAD: usize = 1184;
+const KEY_SOURCE_CLIENT_LEN: usize = 48 + 32 + 32;
+const KEY_SOURCE_SERVER_LEN: usize = 32 + 32;
 
 pub struct Control {
     transport: Arc<Mutex<Transport>>,
@@ -30,11 +33,11 @@ pub struct Control {
     cipher: Cipher,
     auth: Auth,
     keys: Option<Keys>,
-    key_material: Option<KeyMaterial>,
+    seed: Option<SeedData>,
     peer_id: PeerId,
     send_counter: u32,
     replay: ReplayWindow,
-    pending_acks: Vec<u32>,
+    acked: Vec<u32>,
     last_payload: Vec<u8>,
     recv_next: u32,
     reorder: std::collections::BTreeMap<u32, Vec<u8>>,
@@ -94,8 +97,7 @@ impl Control {
         let transport = Arc::new(Mutex::new(transport));
 
         send_raw(&transport, &reset_packet(session_id)).await?;
-        let (remote_session_id, reset_id) =
-            await_reset(&transport, session_id, HANDSHAKE_TIMEOUT).await?;
+        let (remote_session_id, reset_id) = await_reset(&transport, HANDSHAKE_TIMEOUT).await?;
         tracing::debug!(
             "openvpn {}:{} ({}): reset received",
             server.host,
@@ -113,11 +115,11 @@ impl Control {
             cipher: profile.cipher,
             auth: profile.auth,
             keys: None,
-            key_material: None,
+            seed: None,
             peer_id: PeerId::NONE,
             send_counter: 0,
             replay: ReplayWindow::new(),
-            pending_acks: Vec::new(),
+            acked: vec![reset_id],
             last_payload: Vec::new(),
             recv_next: reset_id.wrapping_add(1),
             reorder: std::collections::BTreeMap::new(),
@@ -168,10 +170,11 @@ impl Control {
     }
 
     pub async fn install_keys(&mut self) -> Result<(), Error> {
-        let keys = self
-            .key_material
+        let seed = self
+            .seed
             .take()
             .ok_or_else(|| Error::Control("keys already installed".into()))?;
+        let keys = KeyMaterial::derive(&seed.as_seed(), self.cipher, self.auth.size());
         self.keys = Some(Keys {
             encrypt: DataCipher::new(self.cipher, self.auth, &keys.encrypt, &keys.mac_encrypt)?,
             decrypt: DataCipher::new(self.cipher, self.auth, &keys.decrypt, &keys.mac_decrypt)?,
@@ -190,18 +193,18 @@ impl Control {
         let mut payload = Vec::with_capacity(128);
         payload.extend_from_slice(&0u32.to_be_bytes());
         payload.push(2);
+        debug_assert_eq!(KEY_SOURCE_CLIENT_LEN, 112);
         payload.extend_from_slice(&pre_master);
         payload.extend_from_slice(&random1);
         payload.extend_from_slice(&random2);
-        payload.extend_from_slice(&0u32.to_be_bytes());
         let options = format!(
-            "V4,dev-type tun,link-mtu 1549,tun-mtu 1500,proto UDPv4,cipher {},auth {},keysize {},key-method 2,tls-client",
-            profile.cipher,
+            "V4,dev-type tun,link-mtu 1557,tun-mtu 1500,proto UDPv4,auth {},keysize {},key-method 2,tls-client",
             profile.auth.as_str(),
             profile.cipher.key_len() * 8
         );
         let peer_info = "IV_VER=2.6.9\nIV_PLAT=linux\nIV_TCPNL=1\nIV_NCP=2\n\
-             IV_CIPHERS=AES-256-GCM:AES-128-GCM:AES-256-CBC:AES-128-CBC\nIV_PROTO=2\nIV_MTU=1500\n"
+             IV_CIPHERS=AES-256-GCM:AES-128-GCM:AES-256-CBC:AES-128-CBC\nIV_PROTO=2180\nIV_MTU=1500\n\
+             IV_SSL=OpenSSL\nIV_HWADDR=00:00:00:00:00:00\nIV_ACC=1,A:6,udp\nIV_IPV6=1\n"
             .to_string();
         write_string(&mut payload, &options)?;
         write_string(&mut payload, "")?;
@@ -209,11 +212,10 @@ impl Control {
         write_string(&mut payload, &peer_info)?;
 
         self.tls.write(&payload)?;
-        self.flush_tls().await?;
+        let pending = self.tls.take_outbound();
+        self.send_control_chunks(&pending).await?;
 
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        self.tls.write(b"PUSH_REQUEST\0")?;
-        self.flush_tls().await?;
         let mut buffer = Vec::new();
         let (server_random1, server_random2) = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -227,7 +229,7 @@ impl Control {
             if buffer.is_empty() {
                 continue;
             }
-            if buffer.len() < 5 + 112 {
+            if buffer.len() < 5 + KEY_SOURCE_SERVER_LEN {
                 continue;
             }
             let mut reader = Reader::new(&buffer);
@@ -236,7 +238,7 @@ impl Control {
             if method != 2 {
                 return Err(Error::Control(format!("key method {method}")));
             }
-            let Some(rest) = reader.take(112) else {
+            let Some(rest) = reader.take(KEY_SOURCE_SERVER_LEN) else {
                 continue;
             };
             let mut random1 = [0u8; 32];
@@ -251,20 +253,15 @@ impl Control {
         let mut server_sid = [0u8; SID_SIZE];
         server_sid.copy_from_slice(&self.remote_session_id);
 
-        let seed = crate::openvpn::crypto::Seed {
-            pre_master: &pre_master,
-            client_random1: &random1,
-            server_random1: &server_random1,
-            client_random2: &random2,
-            server_random2: &server_random2,
-            client_sid: &client_sid,
-            server_sid: &server_sid,
-        };
-        self.key_material = Some(KeyMaterial::derive(
-            &seed,
-            profile.cipher,
-            profile.auth.size(),
-        ));
+        self.seed = Some(SeedData {
+            pre_master,
+            client_random1: random1,
+            server_random1,
+            client_random2: random2,
+            server_random2,
+            client_sid,
+            server_sid,
+        });
         Ok(())
     }
 
@@ -314,7 +311,7 @@ impl Control {
     async fn send_control_chunks(&mut self, data: &[u8]) -> Result<(), Error> {
         let mut offset = 0;
         while offset < data.len() {
-            let end = (offset + 1000).min(data.len());
+            let end = (offset + MAX_CONTROL_PAYLOAD).min(data.len());
             self.send_control(&data[offset..end]).await?;
             offset = end;
         }
@@ -355,11 +352,12 @@ impl Control {
     pub async fn send_data(&mut self, payload: &[u8]) -> Result<(), Error> {
         self.send_counter = self.send_counter.wrapping_add(1);
         let counter = self.send_counter;
-        let header = data_header(self.cipher, 0, self.peer_id);
+        let mut header = data_header(self.cipher, 0, self.peer_id);
         let keys = self
             .keys
             .as_ref()
             .ok_or_else(|| Error::Control("data keys missing".into()))?;
+        header.extend_from_slice(&counter.to_be_bytes());
         let encrypted = keys.encrypt.encrypt(&header, counter, payload)?;
         let mut out = Vec::with_capacity(header.len() + encrypted.len());
         out.extend_from_slice(&header);
@@ -435,19 +433,26 @@ impl Control {
         self.send_raw(&out).await
     }
 
+    fn record_ack(&mut self, packet_id: u32) {
+        if self.acked.contains(&packet_id) {
+            return;
+        }
+        self.acked.insert(0, packet_id);
+        self.acked.truncate(MAX_ACKS);
+    }
+
     async fn send_ack(&mut self, packet_id: u32) -> Result<(), Error> {
-        self.pending_acks.push(packet_id);
-        let mut out = Vec::with_capacity(1 + SID_SIZE + 1 + 4 + SID_SIZE);
+        self.record_ack(packet_id);
+        let mut out = Vec::with_capacity(1 + SID_SIZE + 1 + 4 * MAX_ACKS + SID_SIZE);
         out.push(P_ACK_V1 << 3);
         out.extend_from_slice(&self.session_id);
-        self.write_acks(&mut out);
+        let acks = encode_acks(&self.acked, &self.remote_session_id);
+        out.extend_from_slice(&acks);
         self.send_raw(&out).await
     }
 
-    fn write_acks(&mut self, out: &mut Vec<u8>) {
-        let count = self.pending_acks.len().min(MAX_ACKS);
-        let acks = encode_acks(&self.pending_acks[..count], &self.remote_session_id);
-        self.pending_acks.drain(..count);
+    fn write_acks(&self, out: &mut Vec<u8>) {
+        let acks = encode_acks(&self.acked, &self.remote_session_id);
         out.extend_from_slice(&acks);
     }
 
@@ -501,7 +506,6 @@ async fn send_raw(transport: &Arc<Mutex<Transport>>, payload: &[u8]) -> Result<(
 
 async fn await_reset(
     transport: &Arc<Mutex<Transport>>,
-    session_id: [u8; SID_SIZE],
     timeout: Duration,
 ) -> Result<([u8; SID_SIZE], u32), Error> {
     let deadline = Instant::now() + timeout;
@@ -539,13 +543,6 @@ async fn await_reset(
         if packet.opcode == P_CONTROL_HARD_RESET_SERVER_V2 {
             let mut sid = [0u8; SID_SIZE];
             sid.copy_from_slice(&packet.session_id);
-            let mut ack = Vec::with_capacity(1 + SID_SIZE + 1 + 4 + SID_SIZE);
-            ack.push(P_ACK_V1 << 3);
-            ack.extend_from_slice(&session_id);
-            ack.push(1);
-            ack.extend_from_slice(&packet.packet_id.to_be_bytes());
-            ack.extend_from_slice(&sid);
-            send_raw(transport, &ack).await?;
             return Ok((sid, packet.packet_id));
         }
     }
@@ -577,15 +574,15 @@ impl Packet {
         let opcode = byte >> 3;
         if opcode == P_DATA_V1 || opcode == P_DATA_V2 {
             let header_len = if opcode == P_DATA_V2 { 4 } else { 1 };
-            if raw.len() <= header_len {
+            if raw.len() < header_len + 4 {
                 return None;
             }
             return Some(Self {
                 opcode,
                 session_id: Vec::new(),
                 packet_id: 0,
-                header: raw[..header_len].to_vec(),
-                payload: raw[header_len..].to_vec(),
+                header: raw[..header_len + 4].to_vec(),
+                payload: raw[header_len + 4..].to_vec(),
             });
         }
         if raw.len() < 1 + SID_SIZE + 1 {
@@ -660,8 +657,8 @@ pub fn parse_push(reply: &str) -> Pushed {
     for line in reply.split(',') {
         let line = line.trim();
         if let Some(peer) = line.strip_prefix("peer-id ") {
-            if let Some(peer_id) = PeerId::from_hex(peer) {
-                pushed.peer_id = Some(peer_id);
+            if let Ok(id) = peer.trim().parse::<u32>() {
+                pushed.peer_id = Some(PeerId(id));
             }
         } else if let Some(name) = line.strip_prefix("cipher ") {
             if let Some(cipher) = Cipher::parse(name) {
@@ -674,11 +671,10 @@ pub fn parse_push(reply: &str) -> Pushed {
                     break;
                 }
             }
-        } else if let Some(address) = line
-            .strip_prefix("ifconfig ")
-            .and_then(|value| value.split_whitespace().next())
-        {
-            pushed.local = address.parse().ok();
+        } else if let Some(rest) = line.strip_prefix("ifconfig ") {
+            let mut parts = rest.split_whitespace();
+            pushed.local = parts.next().and_then(|value| value.parse().ok());
+            pushed.remote = parts.next().and_then(|value| value.parse().ok());
         }
     }
     pushed
@@ -689,6 +685,7 @@ pub struct Pushed {
     pub cipher: Option<Cipher>,
     pub peer_id: Option<PeerId>,
     pub local: Option<std::net::Ipv4Addr>,
+    pub remote: Option<std::net::Ipv4Addr>,
 }
 
 struct Reader<'a> {
@@ -804,10 +801,10 @@ mod tests {
 
     #[test]
     fn parses_data_packet() {
-        let raw = [0x48u8, 0, 0, 5, 1, 2, 3, 4];
+        let raw = [0x48u8, 0, 0, 5, 0, 0, 0, 1, 1, 2, 3, 4];
         let packet = Packet::parse(&raw).expect("packet");
         assert_eq!(packet.opcode, P_DATA_V2);
-        assert_eq!(packet.header, vec![0x48, 0, 0, 5]);
+        assert_eq!(packet.header, vec![0x48, 0, 0, 5, 0, 0, 0, 1]);
         assert_eq!(packet.payload, vec![1, 2, 3, 4]);
     }
 

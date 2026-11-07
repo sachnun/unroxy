@@ -5,11 +5,13 @@ use std::time::Duration;
 use http::Method;
 use wreq::redirect;
 
+use crate::proxy::pool::Protocol;
 use crate::proxy::{Candidate, ProxyPool};
 
-const MAX_ATTEMPTS: usize = 3;
+const MAX_ATTEMPTS: usize = 6;
 const POOL_MAX_IDLE: usize = 16;
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_TIMEOUT: Duration = Duration::from_secs(40);
 
 struct CachedClient {
     generation: u64,
@@ -29,11 +31,12 @@ pub enum Error {
 
 pub struct RotatingTransport {
     pool: Arc<ProxyPool>,
+    protocol: Option<Protocol>,
 }
 
 impl RotatingTransport {
-    pub fn new(pool: Arc<ProxyPool>) -> Arc<Self> {
-        Arc::new(Self { pool })
+    pub fn new(pool: Arc<ProxyPool>, protocol: Option<Protocol>) -> Arc<Self> {
+        Arc::new(Self { pool, protocol })
     }
 
     fn client(&self, candidate: &Candidate) -> Result<wreq::Client, Error> {
@@ -145,8 +148,15 @@ impl RotatingTransport {
         target_host: &str,
         skip: &[Arc<str>],
     ) -> Result<Candidate, Error> {
+        let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
-            let candidates = self.pool.candidates(target_host);
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::NoUpstream);
+            }
+            let candidates = match self.protocol {
+                Some(protocol) => self.pool.candidates_for(protocol, target_host),
+                None => self.pool.candidates(target_host),
+            };
             if candidates.is_empty() {
                 return Err(Error::NoUpstream);
             }
@@ -180,6 +190,7 @@ mod tests {
                     key: (*key).into(),
                     tunnel: crate::ssh::Tunnel::stub(key, 1) as Arc<dyn crate::proxy::Tunnel>,
                     priority: 0,
+                    protocol: Protocol::Ssh,
                 })
                 .collect(),
         )
@@ -187,7 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_pool_fails_fast() {
-        let transport = RotatingTransport::new(pool_with(&[]));
+        let transport = RotatingTransport::new(pool_with(&[]), None);
         let request = http::Request::builder()
             .uri("http://example.com/")
             .body(wreq::Body::from(""))

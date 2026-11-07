@@ -33,15 +33,18 @@ impl Tunnel {
         let reply = control.push_request().await?;
         control.apply_push(&reply);
         control.install_keys().await?;
-        let local = parse_push(&reply)
+        let pushed = parse_push(&reply);
+        let to_ipv4 = |address: std::net::Ipv4Addr| {
+            let [a, b, c, d] = address.octets();
+            smoltcp::wire::Ipv4Address::new(a, b, c, d)
+        };
+        let local = pushed
             .local
-            .map(|address| {
-                let [a, b, c, d] = address.octets();
-                smoltcp::wire::Ipv4Address::new(a, b, c, d)
-            })
+            .map(to_ipv4)
             .unwrap_or(smoltcp::wire::Ipv4Address::new(10, 8, 0, 2));
+        let remote = pushed.remote.map(to_ipv4);
         let cipher = control.cipher();
-        let stack = Stack::spawn(control, local, profile.servers[0].protocol);
+        let stack = Stack::spawn(control, local, remote, profile.servers[0].protocol);
         let _ = config;
         Ok(Self { stack, cipher })
     }
