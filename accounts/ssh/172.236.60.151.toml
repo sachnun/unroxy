@@ -1,0 +1,7 @@
+region = "AU"
+ssh_port = 22
+ossh_port = 682
+ssh_username = "psiphon_ssh_f50aefdcd0dc5501"
+ssh_password = "74eb4cb4a12c505a493e0595bcdb8da0e804a4e53296b1e48f444af1baeff657"
+ssh_host_key = "AAAAB3NzaC1yc2EAAAADAQABAAABAQDR0EzIJS5+UhHKbLW2a/HAvGW8h2/a9F3D4UfTre6DYw3Z8mSweFtGqN2QQ4uVL3DYLIxGFGW5dohHl2idJJ6jem6v0/deAiIeN+TdsGjh4qsvxk2meiYx7oATCrO+wtIiRIUIUGWAdJfHgIRyAcMBlQCwNvvar0KgOOb8RL3QW6OFipwk61a29ZkPP2QXvLty4y/JEJyfBHrgzvcMzyuUQLdcr0tzRQiIgU0Hj1AWjKqoPRReaP7tEdAO85BPI7Zp6XUJUKFjnd2vamG5We9TUEhw+W7J3dvy2iVHjtG9yWFVqTpmcxA/9t4IL+jA+Ie27mzadN+S/eLzPFQom++3"
+ssh_obfuscated_key = "6311ef165010677be79c6270ede8bda64eb0d020636fe35c0b7a4400bc6ed245"

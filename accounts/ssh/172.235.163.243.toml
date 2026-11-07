@@ -1,0 +1,7 @@
+region = "NL"
+ssh_port = 22
+ossh_port = 175
+ssh_username = "psiphon_ssh_87d8a952f372187b"
+ssh_password = "9bd14446afb9e182fa21bcdb54f8fdf16668ccf5af97292418f0401195a132c5"
+ssh_host_key = "AAAAB3NzaC1yc2EAAAADAQABAAABAQDX1zBJ+H+0hsvhR8WgfjzH8n43q8urQ6Cp7x+87QZ5RTuT6u6LHI8y223fMRjKjSB/Ck/SRws9m7AP74LT8bKiKvV9cEfpTqKxoH7vwpXYExujudWFjzPh2gjvnwwsI7yXLsk3iKq3RhD7c/OMTAIgUx8a9gjoVMzj+yknB67uoAGaH0zWLV1oFiOAUSkxuc4D9rTp/uIJ8L8M/1tQxgDVclu0B3bb4Dz58t/n6YcXj/DeRshzKGISbZnJys2mKVHf6yUNrFwPIkYiFF7zhPdKwPwVoKAkmhQBRCWunBMQY+V51g9OnX5LKUic6nvMA5oSyjubqCk3u0CJWAywO7aL"
+ssh_obfuscated_key = "819ee4ccbade8ab34be4e1746b4d2b5cd84265ee6c83b430cdd2d1fc726747bb"
