@@ -42,6 +42,6 @@ pub async fn build() -> Arc<Proxy> {
     tracing::info!("vpn: {} accounts", vpn.len());
 
     let regions = provider.start().await;
-    tracing::info!("psiphon: {regions} regions online");
+    tracing::info!("ssh: {regions} regions online");
     handler
 }

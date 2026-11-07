@@ -86,8 +86,8 @@ fn build_ssh_tunnel(
     port: u16,
     host_key: &str,
     pool: u32,
-) -> std::io::Result<Arc<crate::psiphon::Tunnel>> {
-    let entry = crate::psiphon::Entry {
+) -> std::io::Result<Arc<crate::ssh::Tunnel>> {
+    let account = crate::ssh::Account {
         ip: "127.0.0.1".to_string(),
         region: "MOCK".to_string(),
         ssh_port: port,
@@ -97,19 +97,19 @@ fn build_ssh_tunnel(
         ssh_host_key: host_key.to_string(),
         ssh_obfuscated_key: String::new(),
     };
-    let config = crate::psiphon::Config {
-        egress_region: "MOCK".to_string(),
-        tunnel_pool_size: pool,
+    let config = crate::ssh::Config {
+        region: "MOCK".to_string(),
+        pool_size: pool,
         ..Default::default()
     };
-    crate::psiphon::Tunnel::start_with(&config, vec![entry])
+    crate::ssh::Tunnel::start_with(&config, vec![account])
         .map(Arc::new)
         .map_err(std::io::Error::other)
 }
 
-fn proxy_with(tunnel: Arc<crate::psiphon::Tunnel>) -> Arc<front::Proxy> {
+fn proxy_with(tunnel: Arc<crate::ssh::Tunnel>) -> Arc<front::Proxy> {
     let pool = ProxyPool::new(vec![PoolProxy {
-        key: "psiphon://test".into(),
+        key: "ssh://test".into(),
         tunnel,
         priority: 0,
     }]);

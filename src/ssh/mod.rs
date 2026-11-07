@@ -1,9 +1,9 @@
-mod entry;
+mod account;
 mod ossh;
 mod session;
 mod socks;
 
-pub use entry::{Entry, all as entries, group_by_region};
+pub use account::{Account, all as accounts, group_by_region};
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
@@ -32,22 +32,21 @@ const EXIT_CACHE_ENTRIES: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("psiphon: {0}")]
+    #[error("ssh: {0}")]
     Core(String),
-    #[error("psiphon socket: {0}")]
+    #[error("ssh socket: {0}")]
     Socket(#[from] std::io::Error),
-    #[error("psiphon tunnel not ready")]
+    #[error("ssh tunnel not ready")]
     Timeout,
-    #[error("psiphon authentication rejected")]
+    #[error("ssh authentication rejected")]
     Auth,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub egress_region: String,
-    pub tunnel_pool_size: u32,
-    pub establish_timeout_seconds: u32,
+    pub region: String,
+    pub pool_size: u32,
     pub client_platform: String,
     pub sponsor_id: String,
     pub propagation_channel_id: String,
@@ -56,9 +55,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            egress_region: String::new(),
-            tunnel_pool_size: 1,
-            establish_timeout_seconds: 300,
+            region: String::new(),
+            pool_size: 1,
             client_platform: "Windows".to_string(),
             sponsor_id: "FFFFFFFFFFFFFFFF".to_string(),
             propagation_channel_id: "FFFFFFFFFFFFFFFF".to_string(),
@@ -79,9 +77,9 @@ struct Inner {
     socks_port: AtomicU16,
     sessions: RwLock<Vec<Arc<Session>>>,
     exits: RwLock<LruCache<String, Exit>>,
-    entries: Vec<Arc<Entry>>,
-    entry_not_before: Vec<AtomicU64>,
-    entry_failures: Vec<AtomicU64>,
+    accounts: Vec<Arc<Account>>,
+    account_not_before: Vec<AtomicU64>,
+    account_failures: Vec<AtomicU64>,
     rotate: AtomicUsize,
     terminate_pending: AtomicUsize,
     connecting: AtomicUsize,
@@ -148,12 +146,12 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn start(config: &Config) -> Result<Self, Error> {
-        Self::start_with(config, entry::parse(entry::all(), &config.egress_region))
+        Self::start_with(config, account::parse(account::all(), &config.region))
     }
 
-    pub fn start_with(config: &Config, entries: Vec<Entry>) -> Result<Self, Error> {
-        let entries: Vec<Arc<Entry>> = entries.into_iter().map(Arc::new).collect();
-        let entry_count = entries.len();
+    pub fn start_with(config: &Config, accounts: Vec<Account>) -> Result<Self, Error> {
+        let accounts: Vec<Arc<Account>> = accounts.into_iter().map(Arc::new).collect();
+        let account_count = accounts.len();
 
         let (socks_port, socks_listener) = {
             let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
@@ -163,14 +161,14 @@ impl Tunnel {
         };
 
         let inner = Arc::new(Inner {
-            region: config.egress_region.clone(),
-            target_pool: config.tunnel_pool_size.max(1) as usize,
+            region: config.region.clone(),
+            target_pool: config.pool_size.max(1) as usize,
             socks_port: AtomicU16::new(socks_port),
             sessions: RwLock::new(Vec::new()),
             exits: RwLock::new(LruCache::new(exit_cache_capacity())),
-            entries,
-            entry_not_before: (0..entry_count).map(|_| AtomicU64::new(0)).collect(),
-            entry_failures: (0..entry_count).map(|_| AtomicU64::new(0)).collect(),
+            accounts,
+            account_not_before: (0..account_count).map(|_| AtomicU64::new(0)).collect(),
+            account_failures: (0..account_count).map(|_| AtomicU64::new(0)).collect(),
             rotate: AtomicUsize::new(0),
             terminate_pending: AtomicUsize::new(0),
             connecting: AtomicUsize::new(0),
@@ -204,9 +202,9 @@ impl Tunnel {
                 socks_port: AtomicU16::new(0),
                 sessions: RwLock::new(Vec::new()),
                 exits: RwLock::new(LruCache::new(exit_cache_capacity())),
-                entries: Vec::new(),
-                entry_not_before: Vec::new(),
-                entry_failures: Vec::new(),
+                accounts: Vec::new(),
+                account_not_before: Vec::new(),
+                account_failures: Vec::new(),
                 rotate: AtomicUsize::new(0),
                 terminate_pending: AtomicUsize::new(0),
                 connecting: AtomicUsize::new(0),
@@ -317,7 +315,7 @@ async fn manage(inner: Arc<Inner>) {
             inner.generation.fetch_add(1, Ordering::Relaxed);
         }
 
-        if inner.entries.is_empty() {
+        if inner.accounts.is_empty() {
             continue;
         }
         loop {
@@ -328,19 +326,19 @@ async fn manage(inner: Arc<Inner>) {
                 break;
             }
             let now = now_millis();
-            let Some(index) = pick_entry(&inner, now) else {
+            let Some(index) = pick_account(&inner, now) else {
                 break;
             };
             let Ok(permit) = Arc::clone(&HANDSHAKES).try_acquire_owned() else {
                 tokio::time::sleep(HANDSHAKE_RETRY).await;
                 continue;
             };
-            let entry = Arc::clone(&inner.entries[index]);
+            let account = Arc::clone(&inner.accounts[index]);
             inner.connecting.fetch_add(1, Ordering::Relaxed);
             let inner = Arc::clone(&inner);
             tokio::spawn(async move {
                 let connected = Session::connect(
-                    &entry,
+                    &account,
                     &inner.timeouts,
                     &inner.sponsor_id,
                     &inner.propagation_channel_id,
@@ -349,15 +347,15 @@ async fn manage(inner: Arc<Inner>) {
                 .await;
                 match connected {
                     Ok(session) => {
-                        inner.entry_failures[index].store(0, Ordering::Relaxed);
-                        inner.entry_not_before[index].store(0, Ordering::Relaxed);
+                        inner.account_failures[index].store(0, Ordering::Relaxed);
+                        inner.account_not_before[index].store(0, Ordering::Relaxed);
                         inner.sessions.write().expect("sessions lock").push(session);
                     }
                     Err(_) => {
                         let failures =
-                            inner.entry_failures[index].fetch_add(1, Ordering::Relaxed) + 1;
+                            inner.account_failures[index].fetch_add(1, Ordering::Relaxed) + 1;
                         let backoff = (1000u64 << failures.min(6)).min(300_000);
-                        inner.entry_not_before[index]
+                        inner.account_not_before[index]
                             .store(now_millis() + backoff, Ordering::Relaxed);
                     }
                 }
@@ -368,11 +366,11 @@ async fn manage(inner: Arc<Inner>) {
     }
 }
 
-fn pick_entry(inner: &Inner, now: u64) -> Option<usize> {
-    let len = inner.entries.len();
+fn pick_account(inner: &Inner, now: u64) -> Option<usize> {
+    let len = inner.accounts.len();
     for _ in 0..len {
         let index = inner.rotate.fetch_add(1, Ordering::Relaxed) % len;
-        if inner.entry_not_before[index].load(Ordering::Relaxed) <= now {
+        if inner.account_not_before[index].load(Ordering::Relaxed) <= now {
             return Some(index);
         }
     }

@@ -14,9 +14,9 @@ use makiko::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
 
-use crate::psiphon::Error;
-use crate::psiphon::entry::Entry;
-use crate::psiphon::ossh::OsshStream;
+use crate::ssh::Error;
+use crate::ssh::account::Account;
+use crate::ssh::ossh::OsshStream;
 use tokio::net::TcpStream;
 
 pub type Channel = TunnelStream;
@@ -81,27 +81,27 @@ pub struct Session {
 
 impl Session {
     pub async fn connect(
-        entry: &Entry,
+        account: &Account,
         timeouts: &Timeouts,
         sponsor_id: &str,
         propagation_channel_id: &str,
         client_platform: &str,
     ) -> Result<Arc<Session>, Error> {
         let expected = base64::engine::general_purpose::STANDARD
-            .decode(&entry.ssh_host_key)
+            .decode(&account.ssh_host_key)
             .map_err(|err| Error::Core(err.to_string()))?;
 
-        let obfuscated = !entry.ssh_obfuscated_key.is_empty() && entry.ossh_port != 0;
+        let obfuscated = !account.ssh_obfuscated_key.is_empty() && account.ossh_port != 0;
         let protocol = if obfuscated { "OSSH" } else { "SSH" };
         let port = if obfuscated {
-            entry.ossh_port
+            account.ossh_port
         } else {
-            entry.ssh_port
+            account.ssh_port
         };
 
         let tcp = match tokio::time::timeout(
             timeouts.connect,
-            TcpStream::connect((entry.ip.as_str(), port)),
+            TcpStream::connect((account.ip.as_str(), port)),
         )
         .await
         {
@@ -114,7 +114,7 @@ impl Session {
         let transport = if obfuscated {
             Transport::Obfuscated(Box::new(OsshStream::new(
                 tcp,
-                &entry.ssh_obfuscated_key,
+                &account.ssh_obfuscated_key,
                 64,
             )))
         } else {
@@ -155,7 +155,7 @@ impl Session {
             .collect();
         let auth_payload = serde_json::json!({
             "SessionId": session_id,
-            "SshPassword": entry.ssh_password,
+            "SshPassword": account.ssh_password,
             "ClientCapabilities": ["server-requests"],
             "SponsorId": sponsor_id,
         })
@@ -164,7 +164,7 @@ impl Session {
         let auth_deadline = timeouts.handshake.saturating_add(timeouts.auth);
         let auth = match tokio::time::timeout(
             auth_deadline,
-            client.auth_password(entry.ssh_username.clone(), auth_payload),
+            client.auth_password(account.ssh_username.clone(), auth_payload),
         )
         .await
         {
@@ -202,7 +202,7 @@ impl Session {
         }
 
         Ok(Arc::new(Session {
-            ip: entry.ip.clone(),
+            ip: account.ip.clone(),
             protocol,
             client,
             closed,

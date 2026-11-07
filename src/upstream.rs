@@ -178,7 +178,7 @@ mod tests {
             keys.iter()
                 .map(|key| PoolProxy {
                     key: (*key).into(),
-                    tunnel: crate::psiphon::Tunnel::stub(key, 1) as Arc<dyn crate::proxy::Tunnel>,
+                    tunnel: crate::ssh::Tunnel::stub(key, 1) as Arc<dyn crate::proxy::Tunnel>,
                     priority: 0,
                 })
                 .collect(),

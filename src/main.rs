@@ -7,7 +7,7 @@ mod geo;
 mod memcheck;
 mod openvpn;
 mod proxy;
-mod psiphon;
+mod ssh;
 #[cfg(test)]
 mod testserver;
 mod upstream;

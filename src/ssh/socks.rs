@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::psiphon::Inner;
+use crate::ssh::Inner;
 
 pub async fn serve(listener: TcpListener, inner: Arc<Inner>) {
     loop {

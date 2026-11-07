@@ -37,8 +37,8 @@ pub enum Error {
     MissingTarget,
     #[error("forwarding unavailable")]
     ForwardUnavailable,
-    #[error("psiphon: {0}")]
-    Tunnel(#[from] crate::psiphon::Error),
+    #[error("ssh: {0}")]
+    Tunnel(#[from] crate::ssh::Error),
     #[error("upstream: {0}")]
     Upstream(String),
     #[error("io: {0}")]
