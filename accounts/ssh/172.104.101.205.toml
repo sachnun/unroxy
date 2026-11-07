@@ -1,0 +1,7 @@
+region = "JP"
+ssh_port = 22
+ossh_port = 53
+ssh_username = "psiphon_ssh_66d1bb9d7d944a23"
+ssh_password = "7bbae555379cbce8b2004252408643d33fda9bb104a0dd100e65229e833ee350"
+ssh_host_key = "AAAAB3NzaC1yc2EAAAADAQABAAABAQCqYzm6C2P1UnhmRjG/9xzeQT0KouNTc8OgvM1SO4yk/MgiavVPo2JVq977rse7+aug5NwxTFEXqc/wVV2E07SX9D17Uez4Lp92ZOH66Cj0Vue/VT5QYskF1C3AZFJffzYZkc1WZrXGJCeyA6eqsOxqTHXm3ZBw709aTsCxT8iJiqGh/1TpLl56gB25bICaYzrJXrK0u6ubccg+qQgjhxXaDNfV9inHCbegOAvprzRUiwlg8diY3PlDufPXdoCsrsY8ELQvsPgukU5CGvMxglcyRq+gBciESxW4VJjKM/TFJ/Ll1JFtbaQzNjr31hnLS+aEnQMtHvn0TjjHQgmbMYHF"
+ssh_obfuscated_key = "4c3f5377dca10c213888c836abcb104acaf9f149cda83d4c881ec2902f96e602"
